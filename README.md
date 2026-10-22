@@ -23,7 +23,7 @@ npm run build
 npm run pack:win
 ```
 
-GitHub 自动构建已配置：每次 main/PR 编译，每个版本标签触发安装器流水线。**安装器目前还需配置经过分发审核的引擎包，否则会明确报错，不产出缺引擎的假成品。** 详见 [构建说明](docs/github-builds.md)。
+GitHub 自动构建已配置：每次 main/PR 编译，每个版本标签触发 **Windows x64 免安装 ZIP** 流水线，通过媒体/打包测试后发布到 Releases（预发布）。完整解压后运行 `Motion Photo Studio.exe`，不需要安装。**目前仍需配置经过分发审核的引擎包，否则流水线明确报错，尚不能下载到完整免安装版。** 详见 [构建说明](docs/github-builds.md)。
 
 ## 状态与隐私
 

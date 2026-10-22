@@ -41,14 +41,14 @@ jobs:
           name: application-code-${{ github.ref_name }}-${{ github.sha }}
           path: app/out/
           if-no-files-found: error
-      - name: Require reviewed engine for version installers
+      - name: Require reviewed engine for complete portable ZIP
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         env:
           ENGINE_URL: ${{ vars.ENGINE_BUNDLE_URL }}
           ENGINE_SHA256: ${{ vars.ENGINE_BUNDLE_SHA256 }}
         run: |
           if (!$env:ENGINE_URL -or $env:ENGINE_SHA256 -notmatch '^[a-fA-F0-9]{64}$') {
-            throw 'Installer blocked: configure reviewed ENGINE_BUNDLE_URL and ENGINE_BUNDLE_SHA256. See docs/github-builds.md. Source compilation is not an installer.'
+            throw 'Portable ZIP blocked: configure reviewed ENGINE_BUNDLE_URL and ENGINE_BUNDLE_SHA256. See docs/github-builds.md. Compiled application code is not a runnable portable distribution.'
           }
           if (([uri]$env:ENGINE_URL).Scheme -ne 'https') { throw 'Engine URL must use HTTPS' }
           Invoke-WebRequest $env:ENGINE_URL -OutFile engine.zip
@@ -62,20 +62,45 @@ jobs:
           $env:FFMPEG_PATH = "$PWD/resources/bin/ffmpeg.exe"
           $env:FFPROBE_PATH = "$PWD/resources/bin/ffprobe.exe"
           npm run test:integration
-      - name: Package unsigned Windows x64 installer
+      - name: Package unsigned Windows x64 portable ZIP
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        run: npx electron-builder --win nsis --x64 --publish never
-      - name: Installer checksums
+        run: npx electron-builder --win zip --x64 --publish never
+      - name: Test exact packaged application
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         run: |
-          Get-ChildItem ../artifacts/desktop/*.exe | ForEach-Object {
+          $env:MOTION_PACKAGED_EXE = (Resolve-Path '../artifacts/desktop/win-unpacked/Motion Photo Studio.exe').Path
+          npx playwright test tests/e2e/export-feedback.spec.ts tests/e2e/export.spec.ts tests/e2e/save.spec.ts
+      - name: Portable ZIP checksums
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        run: |
+          Get-ChildItem ../artifacts/desktop/*-portable.zip | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content ../artifacts/desktop/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         with:
-          name: windows-x64-${{ github.ref_name }}-${{ github.sha }}
+          name: windows-x64-portable-${{ github.ref_name }}-${{ github.sha }}
           path: |
-            artifacts/desktop/*.exe
+            artifacts/desktop/*-portable.zip
             artifacts/desktop/SHA256SUMS.txt
           if-no-files-found: error
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-portable-${{ github.ref_name }}-${{ github.sha }}
+          path: release
+      - name: Publish portable preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$VERSION_TAG" release/*-portable.zip release/SHA256SUMS.txt \
+            --verify-tag --prerelease --title "Motion Photo Studio $VERSION_TAG (Windows portable preview)" \
+            --notes "Windows x64 unsigned portable ZIP. Extract the complete archive and run Motion Photo Studio.exe. Includes native engines. Phone compatibility and clean offline environment acceptance remain incomplete. This is a development preview, not an installer."

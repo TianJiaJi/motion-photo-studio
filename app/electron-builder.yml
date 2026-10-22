@@ -23,11 +23,11 @@ extraResources:
     to: licenses
 win:
   target:
-    - target: nsis
+    - target: zip
       arch:
         - x64
   signAndEditExecutable: false
-  artifactName: MotionPhotoStudio-M4-dev-${version}-win-${arch}-setup.${ext}
+  artifactName: MotionPhotoStudio-${version}-win-${arch}-portable.${ext}
 nsis:
   oneClick: false
   perMachine: false
