@@ -1,0 +1,81 @@
+name: Windows version build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.0'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Verify version tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ($env:REF_TYPE -eq 'tag') {
+            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            if ($env:REF_NAME -cne "v$version") { throw 'Tag must equal v + package.json version' }
+          }
+      - run: npm ci --include=dev
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - name: Compile application (no native engine required)
+        run: npx electron-vite build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: application-code-${{ github.ref_name }}-${{ github.sha }}
+          path: app/out/
+          if-no-files-found: error
+      - name: Require reviewed engine for version installers
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        env:
+          ENGINE_URL: ${{ vars.ENGINE_BUNDLE_URL }}
+          ENGINE_SHA256: ${{ vars.ENGINE_BUNDLE_SHA256 }}
+        run: |
+          if (!$env:ENGINE_URL -or $env:ENGINE_SHA256 -notmatch '^[a-fA-F0-9]{64}$') {
+            throw 'Installer blocked: configure reviewed ENGINE_BUNDLE_URL and ENGINE_BUNDLE_SHA256. See docs/github-builds.md. Source compilation is not an installer.'
+          }
+          if (([uri]$env:ENGINE_URL).Scheme -ne 'https') { throw 'Engine URL must use HTTPS' }
+          Invoke-WebRequest $env:ENGINE_URL -OutFile engine.zip
+          if ((Get-FileHash engine.zip -Algorithm SHA256).Hash -ine $env:ENGINE_SHA256) { throw 'Engine archive hash mismatch' }
+          Expand-Archive engine.zip -DestinationPath resources -Force
+          npm run check:engine
+          if ($LASTEXITCODE -ne 0) { throw 'Engine verification failed' }
+      - name: Media integration tests
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        run: |
+          $env:FFMPEG_PATH = "$PWD/resources/bin/ffmpeg.exe"
+          $env:FFPROBE_PATH = "$PWD/resources/bin/ffprobe.exe"
+          npm run test:integration
+      - name: Package unsigned Windows x64 installer
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        run: npx electron-builder --win nsis --x64 --publish never
+      - name: Installer checksums
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        run: |
+          Get-ChildItem ../artifacts/desktop/*.exe | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content ../artifacts/desktop/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        with:
+          name: windows-x64-${{ github.ref_name }}-${{ github.sha }}
+          path: |
+            artifacts/desktop/*.exe
+            artifacts/desktop/SHA256SUMS.txt
+          if-no-files-found: error

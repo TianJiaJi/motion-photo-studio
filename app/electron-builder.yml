@@ -1,0 +1,40 @@
+appId: local.motionphotostudio.desktop
+productName: Motion Photo Studio
+copyright: Internal development build — not for public redistribution
+asar: true
+asarUnpack:
+  - node_modules/@img/sharp-win32-x64/**/*
+npmRebuild: false
+directories:
+  output: ../artifacts/desktop
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter:
+      - ffmpeg.exe
+      - ffprobe.exe
+  - from: resources/engine-manifest.json
+    to: engine-manifest.json
+  - from: resources/licenses
+    to: licenses
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  signAndEditExecutable: false
+  artifactName: MotionPhotoStudio-M4-dev-${version}-win-${arch}-setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  runAfterFinish: false
+  deleteAppDataOnUninstall: false
+publish: null

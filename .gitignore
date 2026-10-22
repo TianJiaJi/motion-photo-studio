@@ -1,0 +1,24 @@
+app/node_modules/
+app/dist/
+app/out/
+app/resources/bin/
+app/test-results/
+app/playwright-report/
+artifacts/
+*.log
+
+# Local/private materials and harness session data; never publish with source.
+样本/
+private-materials/
+.pi/
+.playwright-cli/
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+*.exe
+*.dll
+*.node
