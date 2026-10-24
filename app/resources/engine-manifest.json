@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "platform": "win32",
+  "arch": "x64",
+  "build": "2026-05-21-git-0857141823-full_build-www.gyan.dev",
+  "binaries": [
+    {
+      "name": "ffmpeg.exe",
+      "sha256": "4727a2433272231932f8bd34e9afcc1b32a70e6d08ed15053d22b746e61dab5f",
+      "size": 225368576
+    },
+    {
+      "name": "ffprobe.exe",
+      "sha256": "025b6caacfedf84d7907f8314047accd234bd549c9a38ae6c01cc884aa6280d8",
+      "size": 225164288
+    }
+  ],
+  "provenance": "Explicit local snapshot; vendor signature/source provenance not independently attested.",
+  "releaseStatus": "internal-development-only"
+}

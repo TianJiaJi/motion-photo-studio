@@ -52,10 +52,10 @@ test('media URLs only read registered unchanged files, obey ranges and revoke ac
     assert.equal((await resources.respond(new Request(asset.url, { headers: { Range: 'bytes=99-' } }), 'app://ui')).status, 416);
     await writeFile(path, 'changed-size');
     assert.equal((await resources.respond(new Request(asset.url), 'app://ui')).status, 409);
-    resources.revoke(asset.id);
+    await resources.revoke(asset.id);
     assert.equal((await resources.respond(new Request(asset.url), 'app://ui')).status, 404);
     assert.equal((await readFile(path, 'utf8')), 'changed-size');
-  } finally { resources.dispose(); await temp.cleanup(); }
+  } finally { await resources.dispose(); await temp.cleanup(); }
 });
 
 test('display dimensions account for rotation/SAR and incompatible codecs require proxies', () => {

@@ -5,10 +5,11 @@ import { formatTime } from '../../shared/editor.ts';
 import type { Thumbnail } from '../../shared/media.ts';
 import { timelineTime, trimKeyValue, trimSelection, type TrimEdge } from '../../shared/timeline.ts';
 
+export type TimelineInteraction = { kind: TrimEdge | 'playhead'; phase: 'begin' | 'update' | 'end' | 'cancel' | 'keyboard'; timeUs: number };
 type Props = {
   durationUs: number; startUs: number; endUs: number; selection: ClipSelection; positionUs: number;
   thumbnails: Thumbnail[]; disabled: boolean; loading: boolean;
-  onSelect(value: ClipSelection): void; onSeek(value: number): void; onSeekEnd(value: number): void; onEdit(): void;
+  onSelect(value: ClipSelection): void; onInteraction(value: TimelineInteraction): void;
 };
 type Drag = { pointer: number; kind: TrimEdge | 'playhead'; initial: ClipSelection; position: number; anchor: number };
 export function Timeline(props: Props) {
@@ -25,30 +26,35 @@ export function Timeline(props: Props) {
   }
   function apply(event: PointerEvent) {
     const d = drag.current; if (!d || d.pointer !== event.pointerId) return;
+    event.stopPropagation();
     const p = latest.current;
     if (p.disabled) return;
     const value = timeAt(event);
-    if (d.kind === 'playhead') { d.position = value; p.onSeek(value); }
+    if (d.kind === 'playhead') d.position = value;
     else {
       const initial = d.kind === 'start' ? d.initial.startUs : d.initial.endUs;
-      p.onSelect(trimSelection(d.initial, d.kind, initial + value - d.anchor, p.durationUs));
+      const selection = trimSelection(d.initial, d.kind, initial + value - d.anchor, p.durationUs);
+      d.position = d.kind === 'start' ? selection.startUs : selection.endUs;
+      p.onSelect(selection);
     }
+    p.onInteraction({ kind: d.kind, phase: 'update', timeUs: d.position });
   }
   function begin(event: PointerEvent, kind: Drag['kind']) {
     if (props.disabled || event.button !== 0) return;
-    event.preventDefault(); event.stopPropagation(); props.onEdit();
+    event.preventDefault(); event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     event.currentTarget instanceof HTMLElement && event.currentTarget.focus();
-    drag.current = { pointer: event.pointerId, kind, initial: { ...props.selection }, position: props.positionUs, anchor: timeAt(event) };
+    const position = kind === 'playhead' ? timeAt(event) : kind === 'start' ? props.selection.startUs : props.selection.endUs;
+    drag.current = { pointer: event.pointerId, kind, initial: { ...props.selection }, position, anchor: timeAt(event) };
     // Grabbing a wide handle does not shift the edge until it actually moves.
-    if (kind === 'playhead') apply(event);
+    props.onInteraction({ kind, phase: 'begin', timeUs: position });
   }
   function finish(event: PointerEvent, cancelled = false) {
     const d = drag.current; if (!d || event.pointerId !== d.pointer) return;
     if (!cancelled) apply(event);
     drag.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    if (!cancelled && d.kind === 'playhead' && !latest.current.disabled) latest.current.onSeekEnd(d.position);
+    latest.current.onInteraction({ kind: d.kind, phase: cancelled || latest.current.disabled ? 'cancel' : 'end', timeUs: d.position });
   }
   function keyboard(event: KeyboardEvent, kind: Drag['kind']) {
     if (props.disabled) return;
@@ -58,12 +64,19 @@ export function Timeline(props: Props) {
     const max = kind === 'start' ? props.selection.endUs - minGap : kind === 'playhead' ? props.endUs : props.durationUs;
     const next = trimKeyValue(event.key, value, min, max, event.shiftKey);
     if (next === null) return;
-    event.preventDefault(); props.onEdit();
-    if (kind === 'playhead') { props.onSeek(next); props.onSeekEnd(next); }
-    else props.onSelect(trimSelection(props.selection, kind, next, props.durationUs));
+    event.preventDefault();
+    let at = next;
+    if (kind !== 'playhead') {
+      const selection = trimSelection(props.selection, kind, next, props.durationUs);
+      props.onSelect(selection); at = kind === 'start' ? selection.startUs : selection.endUs;
+    }
+    props.onInteraction({ kind, phase: 'keyboard', timeUs: at });
   }
   const interactions = { onPointerMove: apply, onPointerUp: (e: PointerEvent) => finish(e),
-    onPointerCancel: (e: PointerEvent) => finish(e, true), onLostPointerCapture: () => { drag.current = null; } };
+    onPointerCancel: (e: PointerEvent) => finish(e, true), onLostPointerCapture: () => {
+      const d = drag.current; drag.current = null;
+      if (d) latest.current.onInteraction({ kind: d.kind, phase: 'cancel', timeUs: d.position });
+    } };
   return <div className={`trim-timeline ${props.disabled ? 'is-disabled' : ''}`} data-testid="trim-timeline">
     <div className="time-ticks" aria-hidden="true">{Array.from({ length: 5 }, (_, i) => <span key={i}>{formatTime(Math.round(props.startUs + span * i / 4))}</span>)}</div>
     <div ref={track} className="timeline-track" data-testid="timeline" onPointerDown={e => begin(e, 'playhead')} {...interactions}>

@@ -24,7 +24,7 @@ test('multi-audio UI requires a track choice or explicit omission and never sile
     const page = await instance.firstWindow(); await instance.context().setOffline(true);
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     await expect(page.getByTestId('open-video')).toBeEnabled({ timeout: 60000 }); await page.getByTestId('open-video').click();
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2);
+    await expect(page.getByTestId('native-preview')).toHaveAttribute('data-frame-id', /\d+/, { timeout: 60000 });
     const tracks = page.getByLabel('所保留的音轨', { exact: true }); await expect(tracks).toHaveValue('');
     await expect(page.getByLabel('保留音轨', { exact: true })).toBeChecked();
     await page.getByTestId('preview-output').click(); await expect(page.getByRole('alert')).toContainText('请选择要保留的音轨');

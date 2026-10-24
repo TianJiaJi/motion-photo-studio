@@ -10,13 +10,15 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: app
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24.11.0'
@@ -32,13 +34,22 @@ jobs:
             if ($env:REF_NAME -cne "v$version") { throw 'Tag must equal v + package.json version' }
           }
       - run: npm ci --include=dev
+      - name: Install pinned Windows Rust toolchain
+        run: |
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          & (Join-Path $cargoHome 'bin/rustup.exe') toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust installation failed' }
+          & (Join-Path $cargoHome 'bin/cargo.exe') +1.99.1 fetch --locked --manifest-path ../native/preview-engine/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Locked Cargo dependency preparation failed' }
+      - name: Build native preview, strict Clippy, unit tests and license inventory
+        run: npm run build:preview-engine
       - run: npm run typecheck
       - run: npm run test:unit
-      - name: Compile application (no native engine required)
+      - name: Compile application code (FFmpeg bundle not required)
         run: npx electron-vite build
       - uses: actions/upload-artifact@v4
         with:
-          name: application-code-${{ github.ref_name }}-${{ github.sha }}
+          name: application-code-${{ github.run_id }}-${{ github.sha }}
           path: app/out/
           if-no-files-found: error
       - name: Require reviewed engine for complete portable ZIP
@@ -56,6 +67,11 @@ jobs:
           Expand-Archive engine.zip -DestinationPath resources -Force
           npm run check:engine
           if ($LASTEXITCODE -ne 0) { throw 'Engine verification failed' }
+          # Never trust a preview helper from the FFmpeg archive: restore our locked local build.
+          npm run build:preview-engine
+          if ($LASTEXITCODE -ne 0) { throw 'Native preview build failed' }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'Complete engine/application verification failed' }
       - name: Media integration tests
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         run: |
@@ -64,12 +80,28 @@ jobs:
           npm run test:integration
       - name: Package unsigned Windows x64 portable ZIP
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        run: npx electron-builder --win zip --x64 --publish never
+        run: |
+          npx electron-builder --win zip --x64 --publish never
+          if ($LASTEXITCODE -ne 0) { throw 'Portable packaging failed' }
+          node scripts/check-package-resources.ts ../artifacts/desktop/win-unpacked/resources
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged native/media resources or license inventory failed verification' }
       - name: Test exact packaged application
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         run: |
           $env:MOTION_PACKAGED_EXE = (Resolve-Path '../artifacts/desktop/win-unpacked/Motion Photo Studio.exe').Path
-          npx playwright test tests/e2e/export-feedback.spec.ts tests/e2e/export.spec.ts tests/e2e/save.spec.ts
+          npx playwright test tests/e2e/desktop.spec.ts tests/e2e/native-preview.spec.ts tests/e2e/native-lifecycle.spec.ts tests/e2e/cleanup.spec.ts tests/e2e/editor.spec.ts tests/e2e/preview-buffer.spec.ts tests/e2e/audio-choice.spec.ts tests/e2e/startup.spec.ts tests/e2e/export-feedback.spec.ts tests/e2e/export.spec.ts tests/e2e/save.spec.ts --workers=1 --grep-invert "missing engine package"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged desktop tests failed' }
+          node scripts/verify-packaged-preview-faults.ts $env:MOTION_PACKAGED_EXE
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated packaged native-engine fault tests failed' }
+      - name: Retain test failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-failures-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            app/test-results/
+            app/playwright-report/
+          if-no-files-found: ignore
       - name: Portable ZIP checksums
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         run: |
@@ -79,7 +111,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         with:
-          name: windows-x64-portable-${{ github.ref_name }}-${{ github.sha }}
+          name: windows-x64-portable-${{ github.run_id }}-${{ github.sha }}
           path: |
             artifacts/desktop/*-portable.zip
             artifacts/desktop/SHA256SUMS.txt
@@ -93,7 +125,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: windows-x64-portable-${{ github.ref_name }}-${{ github.sha }}
+          name: windows-x64-portable-${{ github.run_id }}-${{ github.sha }}
           path: release
       - name: Publish portable preview
         env:

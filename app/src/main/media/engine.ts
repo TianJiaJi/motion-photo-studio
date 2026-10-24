@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { sha256 } from '../motion/io.ts';
 import { runProcess } from './runner.ts';
 import { AppFailure } from '../errors.ts';
+import type { EngineCheckProgress } from '../../shared/contracts.ts';
 
 export type EngineManifest = {
   schemaVersion: 1; platform: 'win32'; arch: 'x64'; build: string;
@@ -25,7 +26,8 @@ export function parseEngineManifest(raw: unknown): EngineManifest {
   return m as EngineManifest;
 }
 
-export async function verifyEngines(resources: string): Promise<EnginePaths> {
+export async function verifyEngines(resources: string, onProgress?: (progress: EngineCheckProgress) => void): Promise<EnginePaths> {
+  onProgress?.({ stage: 'manifest', index: 0, total: 2 });
   let manifest: EngineManifest;
   try {
     const path = join(resources, 'engine-manifest.json');
@@ -33,7 +35,8 @@ export async function verifyEngines(resources: string): Promise<EnginePaths> {
     if (!stat.isFile() || stat.size > 64 * 1024) throw new Error('Invalid manifest file');
     manifest = parseEngineManifest(JSON.parse(await readFile(path, 'utf8')));
   } catch { throw new AppFailure('ENGINE_MISSING', '缺少有效的离线媒体引擎清单，请重新安装完整安装包。'); }
-  for (const binary of manifest.binaries) {
+  for (const [index, binary] of manifest.binaries.entries()) {
+    onProgress?.({ stage: 'integrity', binary: binary.name, index: index + 1, total: manifest.binaries.length });
     const path = join(resources, 'bin', binary.name);
     let stat;
     try { stat = await lstat(path); }
@@ -41,6 +44,7 @@ export async function verifyEngines(resources: string): Promise<EnginePaths> {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== binary.size || await sha256(path) !== binary.sha256) {
       throw new AppFailure('ENGINE_INTEGRITY', `${binary.name} 完整性校验失败，请重新安装。`);
     }
+    onProgress?.({ stage: 'version', binary: binary.name, index: index + 1, total: manifest.binaries.length });
     try {
       const version = (await runProcess(path, ['-version'], { timeoutMs: 15000 })).stdout.split(/\r?\n/)[0];
       if (!version?.startsWith(`${binary.name.slice(0, -4)} version ${manifest.build} Copyright`)) throw new Error('Version mismatch');

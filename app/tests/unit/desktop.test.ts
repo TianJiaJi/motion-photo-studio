@@ -55,7 +55,9 @@ test('missing and tampered engines fail closed without a PATH fallback', async (
         { name: 'ffmpeg.exe', sha256: 'a'.repeat(64), size: 3 }, { name: 'ffprobe.exe', sha256: 'b'.repeat(64), size: 3 },
       ] }));
     await writeFile(join(temp.directory, 'bin/ffmpeg.exe'), 'bad');
-    await assert.rejects(verifyEngines(temp.directory), { code: 'ENGINE_INTEGRITY' });
+    const stages: string[] = [];
+    await assert.rejects(verifyEngines(temp.directory, progress => stages.push(progress.stage)), { code: 'ENGINE_INTEGRITY' });
+    assert.deepEqual(stages, ['manifest', 'integrity'], 'Tampered binary never reaches launch/version verification');
   } finally { await temp.cleanup(); }
 });
 

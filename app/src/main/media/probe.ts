@@ -1,7 +1,7 @@
 import { ffprobe, ffmpeg, runProcess } from './runner.ts';
 
 export type Stream = {
-  index: number; codec_type: string; codec_name: string; profile?: string; width?: number; height?: number;
+  index: number; id?: string; codec_type: string; codec_name: string; profile?: string; width?: number; height?: number;
   pix_fmt?: string; avg_frame_rate?: string; r_frame_rate?: string; duration?: string;
   color_space?: string; color_transfer?: string; color_primaries?: string; color_range?: string;
   sample_rate?: string; channels?: number; disposition?: { attached_pic?: number };
@@ -11,7 +11,7 @@ export type Stream = {
 export type MediaProbe = { streams: Stream[]; format: { duration?: string; format_name?: string } };
 export async function probeMedia(path: string, options: { executable?: string; signal?: AbortSignal } = {}): Promise<MediaProbe> {
   const { stdout } = await runProcess(options.executable ?? ffprobe(), ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_entries',
-    'stream=index,codec_type,codec_name,profile,width,height,pix_fmt,avg_frame_rate,r_frame_rate,duration,color_space,color_transfer,color_primaries,color_range,sample_rate,channels,time_base,start_pts,start_time,duration_ts,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation:format=duration,format_name',
+    'stream=index,id,codec_type,codec_name,profile,width,height,pix_fmt,avg_frame_rate,r_frame_rate,duration,color_space,color_transfer,color_primaries,color_range,sample_rate,channels,time_base,start_pts,start_time,duration_ts,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation:format=duration,format_name',
     '-of', 'json', '-i', path], { signal: options.signal });
   return JSON.parse(stdout) as MediaProbe;
 }

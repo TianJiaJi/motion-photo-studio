@@ -43,7 +43,7 @@ test('offline desktop saves validated single Motion JPGs through native chooser 
     await expect(page.getByTestId('open-video')).toBeEnabled({ timeout: 60000 });
     await page.evaluate(() => { window.motion.media.onExportProgress(p => { if (p.saveId) { document.body.dataset.saveId = p.saveId; document.body.dataset.saveAsset = p.assetId; } }); });
     await page.getByTestId('open-video').click();
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2);
+    await expect(page.getByTestId('native-preview')).toHaveAttribute('data-frame-id', /\d+/, { timeout: 60000 });
     await page.getByLabel('原画质（跟随原片）', { exact: true }).check();
     await page.getByTestId('export-motion').click();
     const preview = page.getByRole('dialog', { name: '输出预览', exact: true }); await expect(preview).toBeVisible({ timeout: 60000 });

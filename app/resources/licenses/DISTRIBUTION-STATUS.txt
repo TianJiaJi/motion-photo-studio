@@ -1,0 +1,4 @@
+INTERNAL DEVELOPMENT BUILD ONLY
+These local tools have pinned hashes and matching versions, not an independent source/provenance attestation.
+Public redistribution is blocked until M5 completes corresponding-source and third-party license review.
+Upstream source: https://git.ffmpeg.org/ffmpeg.git (revision embedded in build label); this pointer alone does NOT satisfy corresponding-source obligations for the full configured build.

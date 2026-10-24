@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 export type ProcessResult = { stdout: string; stderr: string };
 export type ProcessOptions = {
@@ -34,9 +35,10 @@ export function runProcess(executable: string, args: string[], options: ProcessO
   });
 }
 
-// PoC development tools only. Production must use reviewed, pinned bundled binaries in M1.
-export const ffmpeg = () => process.env.FFMPEG_PATH || 'ffmpeg';
-export const ffprobe = () => process.env.FFPROBE_PATH || 'ffprobe';
+// Development/test convenience only; production passes paths from verifyEngines explicitly.
+// Never let an unconfigured regression/oracle silently select a different executable from PATH.
+export const ffmpeg = () => fileURLToPath(new URL('../../../resources/bin/ffmpeg.exe', import.meta.url));
+export const ffprobe = () => fileURLToPath(new URL('../../../resources/bin/ffprobe.exe', import.meta.url));
 export async function toolVersions() {
   return {
     ffmpeg: (await runProcess(ffmpeg(), ['-version'])).stdout.split(/\r?\n/)[0],

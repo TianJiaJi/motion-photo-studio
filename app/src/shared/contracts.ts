@@ -1,4 +1,5 @@
 import type { MediaAPI } from './media-ipc.ts';
+import type { CleanupIssue } from './cleanup.ts';
 
 export const CHANNELS = Object.freeze({
   snapshot: 'motion:snapshot', startDiagnostics: 'motion:start-diagnostics',
@@ -9,11 +10,17 @@ export type AppErrorCode = 'INVALID_REQUEST' | 'UNTRUSTED_SENDER' | 'ENGINE_NOT_
   | 'ENGINE_MISSING' | 'ENGINE_INTEGRITY' | 'ENGINE_VERSION' | 'JOB_BUSY'
   | 'JOB_NOT_FOUND' | 'MEDIA_FAILED' | 'TEMP_CLEANUP' | 'INTERNAL'
   | 'CANCELLED' | 'SOURCE_CHANGED' | 'MEDIA_NOT_FOUND' | 'HDR_CONFIRM_REQUIRED' | 'FRAME_BOUNDARY'
-  | 'OUTPUT_EXISTS' | 'OUTPUT_ACCESS' | 'OUTPUT_UNSUPPORTED' | 'OUTPUT_VERIFY' | 'DISK_SPACE';
+  | 'OUTPUT_EXISTS' | 'OUTPUT_ACCESS' | 'OUTPUT_UNSUPPORTED' | 'OUTPUT_VERIFY' | 'DISK_SPACE'
+  | 'NATIVE_PROTOCOL' | 'NATIVE_EXIT' | 'NATIVE_MEDIA' | 'NATIVE_BUSY' | 'NATIVE_TIMEOUT'
+  | 'FRAME_INDEX' | 'PREVIEW_BUDGET' | 'PREVIEW_DISK_FULL'
+  | 'NATIVE_ENGINE_MISSING' | 'NATIVE_ENGINE_INTEGRITY' | 'NATIVE_ENGINE_VERSION' | 'NATIVE_PLATFORM';
 export type AppError = { code: AppErrorCode; message: string };
 export type Reply<T> = { ok: true; value: T } | { ok: false; error: AppError };
+export type EngineCheckProgress = {
+  stage: 'manifest' | 'integrity' | 'version'; binary?: 'ffmpeg.exe' | 'ffprobe.exe'; index: number; total: number;
+};
 export type EngineStatus = {
-  state: 'checking' | 'ready' | 'error'; version?: string; integrityVerified: boolean; error?: AppError;
+  state: 'checking' | 'ready' | 'error'; version?: string; integrityVerified: boolean; error?: AppError; check?: EngineCheckProgress;
 };
 export type JobState = {
   id: string; kind: 'diagnostics'; state: 'running' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
@@ -22,7 +29,7 @@ export type JobState = {
 export type AppSnapshot = {
   revision: number; appVersion: string; milestone: 'M1' | 'M2' | 'M3' | 'M4' | 'M5'; savingReady: boolean; offline: true; defaultProfile: string;
   target: { model: string; osBuild: string; android: string; gallery: string };
-  engines: EngineStatus; job: JobState | null; startupWarnings: string[];
+  engines: EngineStatus; previewEngine: EngineStatus; job: JobState | null; startupWarnings: string[]; cleanupIssues: CleanupIssue[];
 };
 export type DesktopAPI = {
   readonly security: Readonly<{ sandboxed: boolean; contextIsolated: boolean }>;

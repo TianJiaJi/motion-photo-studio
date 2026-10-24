@@ -29,7 +29,7 @@ test('desktop switches effective modes, restores edits and actually renders veri
     const page = await instance.firstWindow(); const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     await instance.context().setOffline(true); await expect(page.getByTestId('open-video')).toBeEnabled({ timeout: 60000 });
     await page.getByTestId('open-video').click();
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2);
+    await expect(page.getByTestId('native-preview')).toHaveAttribute('data-frame-id', /\d+/, { timeout: 60000 });
     await page.getByRole('button', { name: '自由框选', exact: true }).click();
     const box = (await page.getByTestId('crop-stage').boundingBox())!;
     await page.mouse.move(box.x + box.width * .2, box.y + box.height * .2); await page.mouse.down();

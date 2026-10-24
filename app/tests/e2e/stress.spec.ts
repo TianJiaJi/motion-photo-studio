@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { sha256, extractRange } from '../../src/main/motion/io.ts';
 import { validateMotion } from '../../src/main/motion/validate.ts';
 import { runProcess } from '../../src/main/media/runner.ts';
+import { MediaResources } from '../../src/main/media/resources.ts';
 
 function environment(userData: string): Record<string, string> {
   const env = Object.fromEntries(Object.entries(process.env).filter((row): row is [string, string] => row[1] !== undefined));
@@ -17,7 +18,7 @@ function time(seconds: number): string {
 }
 type Fixture = { name: string; input: string; inputBytes: number; inputSha256: string; durationUs: number };
 
-test('opt-in packaged UI handles real >4GiB ranges and two-hour end seeks, stays responsive and saves verified short tail clips', async () => {
+test('opt-in packaged native UI handles large sources and two-hour end seeks, independently checks 64-bit resource ranges and saves verified short tails', async () => {
   test.skip(!process.env.MOTION_STRESS_MANIFEST || !process.env.MOTION_PACKAGED_EXE, 'Requires passed actual-media stress manifest and exact new packaged EXE; never substitutes tiny fixtures.');
   test.setTimeout(600000);
   const manifest = JSON.parse(await readFile(resolve(process.env.MOTION_STRESS_MANIFEST!), 'utf8')) as { status: string; records: Fixture[] };
@@ -57,21 +58,27 @@ test('opt-in packaged UI handles real >4GiB ranges and two-hour end seeks, stays
       const end = fixture.durationUs / 1000000; const start = end - (index === 0 ? 2 : 3); const seek = end - 1;
       await expect(page.getByTestId('open-video')).toBeEnabled({ timeout: 60000 }); await page.getByTestId('open-video').click();
       await expect(page.getByTestId('asset-name')).toHaveText('输入 source.mp4', { timeout: 60000 });
-      const player = page.getByTestId('video-preview'); await expect(player).toHaveAttribute('src', /^media:\/\/asset\//, { timeout: 60000 });
-      const originalUrl = await player.getAttribute('src');
+      const player = page.getByTestId('native-preview'); await expect(player).toHaveAttribute('data-frame-id', /\d+/, { timeout: 300000 });
       const offset = index === 0 ? 4294967296 : fixture.inputBytes - 64;
-      const range = await page.evaluate(async ({ url, offset }) => {
-        const response = await fetch(url!, { headers: { Range: `bytes=${offset}-${offset + 63}` } });
-        return { status: response.status, range: response.headers.get('Content-Range'), bytes: [...new Uint8Array(await response.arrayBuffer())] };
-      }, { url: originalUrl, offset });
+      // The native editor deliberately does not expose original video URLs. Test the range implementation
+      // independently here; this is not an assertion about browser playback of the original source.
+      const resources = new MediaResources();
+      const range = await (async () => {
+        try {
+          const ref = await resources.register(fixture.input, 'video/mp4');
+          const response = await resources.respond(new Request(ref.url, { headers: { Range: `bytes=${offset}-${offset + 63}` } }), 'app://ui');
+          return { status: response.status, range: response.headers.get('Content-Range'), bytes: [...new Uint8Array(await response.arrayBuffer())] };
+        } finally { await resources.dispose(); }
+      })();
       const file = await open(fixture.input, 'r'); const expected = Buffer.alloc(64);
       try { expect((await file.read(expected, 0, 64, offset)).bytesRead).toBe(64); } finally { await file.close(); }
       expect(range).toEqual({ status: 206, range: `bytes ${offset}-${offset + 63}/${fixture.inputBytes}`, bytes: [...expected] });
       await page.getByLabel('精确定位', { exact: true }).fill(time(seek)); await page.getByLabel('精确定位', { exact: true }).press('Enter');
-      await expect(page.getByTestId('playhead')).toHaveText(time(seek), { timeout: 60000 }); await expect(page.getByTestId('exact-frame')).toBeVisible();
-      await page.getByLabel('强制兼容预览', { exact: true }).check(); await expect(player).not.toHaveAttribute('src', originalUrl!);
-      await expect.poll(() => player.evaluate(node => (node as HTMLVideoElement).readyState), { timeout: 60000 }).toBeGreaterThanOrEqual(2);
-      const proxyDuration = await player.evaluate(node => (node as HTMLVideoElement).duration); expect(proxyDuration).toBeLessThanOrEqual(12.2);
+      await expect(page.getByTestId('playhead')).toHaveText(time(seek), { timeout: 60000 });
+      const sourceFrameTimeUs = Number(await player.getAttribute('data-time-us'));
+      expect(sourceFrameTimeUs).toBeGreaterThanOrEqual(seek * 1000000);expect(sourceFrameTimeUs - seek * 1000000).toBeLessThan(100000);
+      await expect(page.getByTestId('video-preview')).toHaveCount(0);
+      await expect(page.getByLabel('强制兼容预览', { exact: true })).toHaveCount(0);
       await page.getByLabel('截取开始', { exact: true }).fill(time(start)); await page.getByLabel('截取开始', { exact: true }).press('Enter');
       await page.getByLabel('截取结束', { exact: true }).fill(time(end)); await page.getByLabel('截取结束', { exact: true }).press('Enter');
       await page.getByLabel('原画质（跟随原片）', { exact: true }).check();
@@ -94,14 +101,14 @@ test('opt-in packaged UI handles real >4GiB ranges and two-hour end seeks, stays
       await page.getByRole('button', { name: '关闭输出预览', exact: true }).click(); await page.getByRole('button', { name: '关闭素材', exact: true }).click();
       await expect(page.getByTestId('editor')).toHaveCount(0); expect(await sha256(fixture.input)).toBe(fixture.inputSha256);
       results.push({ fixture: fixture.name, requestedStartSeconds: start, requestedEndSeconds: end, range: { offset, length: 64, total: fixture.inputBytes },
-        proxyDuration, cancelMs, output: outputs[index], outputSha256: await sha256(outputs[index]!), validated: inspected });
+        sourceFrameTimeUs, cancelMs, output: outputs[index], outputSha256: await sha256(outputs[index]!), validated: inspected });
     }
     const heartbeat = await page.evaluate(() => (window as unknown as { __stressHeartbeat: () => { count: number; maxGapMs: number } }).__stressHeartbeat());
     expect(heartbeat.count).toBeGreaterThan(10); expect(heartbeat.maxGapMs).toBeLessThan(2000); expect(pageErrors).toEqual([]);
     stopped = true; await sampling; expect(metrics.length).toBeGreaterThan(2);
     expect(await readdir(join(userData, 'publications'))).toEqual([]); expect(await readdir(join(userData, 'media-sessions'))).toEqual([]);
     await writeFile(join(outputDir, 'result.json'), JSON.stringify({ status: 'passed', executable: process.env.MOTION_PACKAGED_EXE, results, heartbeat, metrics,
-      scope: 'Real large/long UI import, 64-bit ranged bytes, end seek, bounded proxy, cancellation and short tail outputs only. Metrics are sampled Electron process working sets; native child/OS cache not included, shared pages not deduplicated. Not full long/large UI export, phone or clean install.' }, null, 2), { flag: 'wx', flush: true });
+      scope: 'Real large/long native UI import, independent host resource 64-bit range check (not browser source streaming), end seek, cancellation and short tail outputs only. Metrics are sampled Electron process working sets; native child/OS cache not included, shared pages not deduplicated. Not full long/large UI export, phone or clean install.' }, null, 2), { flag: 'wx', flush: true });
   } catch (error) {
     await writeFile(join(outputDir, 'failure.json'), JSON.stringify({ status: 'failed', results, metrics, error: String(error), stack: error instanceof Error ? error.stack : undefined }, null, 2), { flag: 'wx', flush: true }); throw error;
   } finally {

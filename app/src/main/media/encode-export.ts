@@ -12,7 +12,6 @@ import { planEncodeRange, type EncodeRangePlan } from './encode-plan.ts';
 import { videoProcessing } from './video-processing.ts';
 import { streamProcessLines } from './lines.ts';
 import { encodeAudioDraft, validateEncodedAudio } from './encode-audio.ts';
-import { preservePcmAudio, verifyPcmStage, type PcmSpan } from './pcm-audio.ts';
 
 export type EncodeAudio = AudioSelection;
 export type EncodeStage = 'plan' | 'audio' | 'video' | 'verify' | 'decode';
@@ -41,11 +40,11 @@ export async function exportEncodedMedia(options: {
   if (!options.matchSourceParameters && audio && audio.channels! > 2 && !(options.audio.kind === 'track' && options.audio.downmixStereo)) throw new Error('多声道转为立体声需要明确同意，不会静默降混。');
   const channels = audio ? options.matchSourceParameters ? audio.channels! : Math.min(2, audio.channels!) : 0;
   const sampleRate = audio && options.matchSourceParameters ? Number(audio.sample_rate) : 48000;
-  const pcm = Boolean(options.matchSourceParameters && audio?.codec_name === 'pcm_s16le');
   const warnings = [...processing.warnings, '普通模式会重新编码视频；不保留字幕、附件、章节或原有附加元数据。'];
   if (options.matchSourceParameters) warnings.push('原画质预设：跟随原片显示尺寸与帧时序，采用高保真编码；不是数学上的严格无损。');
-  if (audio) warnings.push(pcm ? `所选音轨 ${audio.index} 保持 PCM16 / ${sampleRate} Hz / ${channels} 声道，只截取对应声音样本，不压缩/重采样/降混。`
-    : `按明确选择保留音轨 ${audio.index}，编码为 ${channels} 声道 AAC-LC / ${sampleRate} Hz；${options.matchSourceParameters ? '采样率/声道跟随原片，但音频重新编码非严格无损。' : '按源时间戳处理静音缺口。'}其余音轨不保留。`);
+  // Source matching preserves rate/channel count, not the source codec. PCM in MP4 can
+  // decode in the preview yet be silent in a phone's motion-photo player.
+  if (audio) warnings.push(`按明确选择保留音轨 ${audio.index}，编码为 ${channels} 声道 AAC-LC / ${sampleRate} Hz；${options.matchSourceParameters ? '为提高相册兼容性，音频统一采用 AAC-LC；采样率/声道跟随原片，但重新编码非严格无损。' : '按源时间戳处理静音缺口。'}其余音轨不保留。`);
   else if (info.hasAudio) warnings.push('已明确选择不保留音轨。');
   if (!options.matchSourceParameters && audio && audio.channels! > 2) warnings.push('已明确同意将多声道降混为立体声。');
   await options.onStage?.('plan');
@@ -74,7 +73,7 @@ export async function exportEncodedMedia(options: {
   // Other VFR intervals are represented by adjacent timestamps, not an average-FPS approximation.
   const packetDuration = fps === null ? `if(eq(PTS,${last - start}),${end - last},DURATION)` : `max(1,min(DURATION,${durationUs}-PTS))`;
   const audioPath = `${output}.audio.mp4`; let audioCreated = false; let succeeded = false;
-  let coverTimestampUs = -1; let pendingFrame: string | undefined; let pcmProof: PcmSpan | undefined;
+  let coverTimestampUs = -1; let pendingFrame: string | undefined;
   await writeFile(output, '', { flag: 'wx' });
   try {
     const progress = async (stage: 'audio' | 'video', line: string) => {
@@ -84,10 +83,7 @@ export async function exportEncodedMedia(options: {
     if (audio) {
       await options.onStage?.('audio');
       if (options.audio.kind !== 'track') throw new Error('Explicit audio selection required');
-      if (pcm) {
-        const prepared = await preservePcmAudio({ source, index: options.audio.index, startPts: plan.startPts, endPts: plan.endPts, timeBase: plan.timeBase,
-          output: audioPath, engines, signal }); pcmProof = prepared.proof;
-      } else await encodeAudioDraft({ source, selection: options.audio, startUs, endUs, durationUs, output: audioPath, engines, signal,
+      await encodeAudioDraft({ source, selection: options.audio, startUs, endUs, durationUs, output: audioPath, engines, signal,
         matchSourceParameters: options.matchSourceParameters, onProgress: timeUs => options.onProgress?.('audio', timeUs) });
       audioCreated = true;
     }
@@ -118,12 +114,7 @@ export async function exportEncodedMedia(options: {
       || v.color_primaries !== 'bt709' || v.color_transfer !== 'bt709' || v.color_space !== 'bt709' || v.color_range !== 'tv')
       throw new Error(`普通输出的视频尺寸、色彩或时间范围未通过验证（期望 ${durationUs} µs，实际 ${finalInfo.durationUs} µs）。`);
     let audioReport: EncodeReport['audio'] = null;
-    if (audio) {
-      if (pcmProof) {
-        await verifyPcmStage(file, pcmProof, engines, signal);
-        audioReport = { codec: 'pcm_s16le', channels, sampleRate, durationUs: Number(BigInt(pcmProof.samples) * 1000000n / BigInt(sampleRate)) };
-      } else audioReport = { ...validateEncodedAudio(a, channels, durationUs, sampleRate), codec: 'aac' };
-    }
+    if (audio) audioReport = { ...validateEncodedAudio(a, channels, durationUs, sampleRate), codec: 'aac' };
     if (coverTimestampUs < -1 || coverTimestampUs >= finalInfo.durationUs) throw new Error('封面帧关联时间无效。');
     if (options.coverSourcePts !== undefined && coverTimestampUs === -1) warnings.push('所选封面帧未保留在输出帧序列中，时间戳记为未知，不冒充输出首帧。');
     await options.onStage?.('decode');

@@ -5,11 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { CHANNELS } from '../shared/contracts.ts';
 import { MEDIA_CHANNELS } from '../shared/media-ipc.ts';
 import { parseMediaRequest } from './media/requests.ts';
+import { NATIVE_CHANNELS } from '../shared/native-preview.ts';
+import { parseNativePrepare, parseNativeControl, parseNativeAck, parseNativeCapture } from './media/native-requests.ts';
 import { MediaResources } from './media/resources.ts';
 import { MediaSession } from './media/session.ts';
 import type { AppSnapshot, EngineStatus } from '../shared/contracts.ts';
 import { DEFAULT_PROFILE_ID, VERIFIED_TARGET } from './motion/profiles.ts';
 import { verifyEngines } from './media/engine.ts';
+import { verifyNativeEngine, verifyNativeFiles } from './media/native-engine.ts';
 import type { EnginePaths } from './media/engine.ts';
 import { DiagnosticQueue } from './jobs/queue.ts';
 import { TempFiles } from './jobs/temp-files.ts';
@@ -34,7 +37,10 @@ protocol.registerSchemesAsPrivileged([
 let window: BrowserWindow | null = null;
 let engines: EnginePaths | undefined;
 let engineStatus: EngineStatus = { state: 'checking', integrityVerified: false };
+let previewEngineStatus: EngineStatus = { state: 'checking', integrityVerified: false };
+let previewCheck: Promise<unknown> | undefined;
 let warnings: string[] = [];
+const cleanupStores: TempFiles[] = [];
 let jobs: DiagnosticQueue | undefined;
 let editor: MediaSession | undefined;
 let publications: Publications | undefined;
@@ -47,8 +53,8 @@ let revision = 0;
 function snapshot(): AppSnapshot {
   return {
     revision, appVersion: app.getVersion(), milestone: 'M4', savingReady: Boolean(publications), offline: true, defaultProfile: DEFAULT_PROFILE_ID,
-    target: VERIFIED_TARGET, engines: structuredClone(engineStatus), job: jobs?.snapshot() ?? null,
-    startupWarnings: [...warnings],
+    target: VERIFIED_TARGET, engines: structuredClone(engineStatus), previewEngine: structuredClone(previewEngineStatus), job: jobs?.snapshot() ?? null,
+    startupWarnings: [...new Set(warnings)], cleanupIssues: cleanupStores.flatMap(store => store.issues),
   };
 }
 function broadcast() {
@@ -97,9 +103,13 @@ else {
     event.preventDefault();
     if (shuttingDown) return;
     shuttingDown = true;
-    void Promise.all([jobs?.shutdown(), editor?.shutdown()])
-      .catch(error => console.error('Task cleanup failed:', publicError(error)))
-      .finally(() => { mediaResources.dispose(); safeToQuit = true; app.quit(); });
+    void Promise.allSettled([jobs?.shutdown(), editor?.shutdown(), previewCheck])
+      .then(results => {
+        for (const result of results) if (result.status === 'rejected') console.error('Task cleanup failed:', publicError(result.reason));
+        return mediaResources.dispose();
+      })
+      .catch(error => console.error('Resource drain failed:', publicError(error)))
+      .finally(() => { safeToQuit = true; app.quit(); });
   });
   void app.whenReady().then(async () => {
     const localSession = session.defaultSession;
@@ -133,9 +143,10 @@ else {
     await protocol.handle('media', request => mediaResources.respond(request, developmentUrl ? new URL(developmentUrl).origin : 'app://ui'));
     const sessionTemp = new TempFiles(join(app.getPath('userData'), 'media-sessions'));
     const temp = new TempFiles(join(app.getPath('userData'), 'jobs'));
-    try { warnings = await temp.initialize(); }
+    cleanupStores.push(temp, sessionTemp);
+    try { await temp.initialize(); }
     catch { warnings = ['任务目录不可写，媒体自检将无法完成。']; }
-    try { warnings.push(...await sessionTemp.initialize()); }
+    try { await sessionTemp.initialize(); }
     catch { warnings.push('媒体缓存目录不可写，请检查应用数据目录权限。'); }
     try {
       const candidate = new Publications(join(app.getPath('userData'), 'publications'));
@@ -161,21 +172,27 @@ else {
     ipcMain.handle(MEDIA_CHANNELS.cancelImport, (event, ...args: unknown[]) => reply(async () => {
       trusted(event); assertNoArgs(args); await mediaReady().cancelImport(); return null;
     }));
-    ipcMain.handle(MEDIA_CHANNELS.preview, (event, ...args: unknown[]) => reply(() => {
-      trusted(event); const p = parseMediaRequest('preview', args);
-      return mediaReady().preview(p.assetId, p.timeUs, p.forceProxy, p.hdrConsent);
+    ipcMain.handle(NATIVE_CHANNELS.prepare, (event, ...args: unknown[]) => reply(() => {
+      trusted(event); const p = parseNativePrepare(args);
+      if (previewEngineStatus.state !== 'ready') throw new AppFailure('ENGINE_NOT_READY', '原生预览引擎未通过校验，请检查帮助中的状态。');
+      return mediaReady().prepareNative(p.assetId, p.hdrConsent);
+    }, error => console.error('Native preparation failed:', error)));
+    ipcMain.handle(NATIVE_CHANNELS.control, (event, ...args: unknown[]) => reply(async () => {
+      trusted(event); const p = parseNativeControl(args);
+      const target = p.action === 'pause' && editor && !shuttingDown ? editor : mediaReady();
+      await target.nativeControl(p); return null;
     }));
-    ipcMain.handle(MEDIA_CHANNELS.frame, (event, ...args: unknown[]) => reply(() => {
-      trusted(event); const p = parseMediaRequest('frame', args);
-      return mediaReady().frame(p.assetId, p.timeUs, p.hdrConsent, p.step);
+    ipcMain.handle(NATIVE_CHANNELS.ack, (event, ...args: unknown[]) => reply(() => {
+      trusted(event); const p = parseNativeAck(args);
+      if (!editor) throw new AppFailure('CANCELLED', '预览会话已关闭。');
+      editor.nativeAcknowledge(p); return null;
+    }));
+    ipcMain.handle(NATIVE_CHANNELS.capture, (event, ...args: unknown[]) => reply(() => {
+      trusted(event); const p = parseNativeCapture(args); return mediaReady().nativeCover(p.assetId, p.frameId);
     }));
     ipcMain.handle(MEDIA_CHANNELS.thumbnails, (event, ...args: unknown[]) => reply(() => {
       trusted(event); const p = parseMediaRequest('thumbnails', args);
       return mediaReady().thumbnails(p.assetId, p.startUs, p.endUs, p.count, p.hdrConsent);
-    }));
-    ipcMain.handle(MEDIA_CHANNELS.captureCover, (event, ...args: unknown[]) => reply(() => {
-      trusted(event); const p = parseMediaRequest('captureCover', args);
-      return mediaReady().coverFromFrame(p.assetId, p.timeUs, p.hdrConsent);
     }));
     ipcMain.handle(MEDIA_CHANNELS.uploadCover, (event, ...args: unknown[]) => reply(async () => {
       trusted(event); const p = parseMediaRequest('uploadCover', args); mediaReady().assertActive(p.assetId);
@@ -201,22 +218,49 @@ else {
     window = new BrowserWindow({
       width: 1180, height: 820, minWidth: 860, minHeight: 640, backgroundColor: '#151517',
       title: `实况工坊 ${app.getVersion()} · 本地视频编辑`, show: false, autoHideMenuBar: true,
+      // Native WASAPI playback is outside Chromium's media detection. Throttling RAF
+      // in the background stalls Canvas ACKs while its audio/device clock keeps running.
       webPreferences: { preload: join(here, '../preload/index.cjs'), sandbox: true, contextIsolation: true,
-        nodeIntegration: false, webviewTag: false, webSecurity: true, allowRunningInsecureContent: false },
+        backgroundThrottling: false, nodeIntegration: false, webviewTag: false, webSecurity: true, allowRunningInsecureContent: false },
     });
+    window.on('page-title-updated', event => event.preventDefault());
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', (event, url) => { if (!isTrustedRenderer(url, developmentUrl)) event.preventDefault(); });
     window.webContents.on('will-redirect', event => event.preventDefault());
     window.webContents.on('will-attach-webview', event => event.preventDefault());
     window.once('ready-to-show', () => window?.show());
     window.on('closed', () => { window = null; });
-    await window.loadURL(developmentUrl ?? APP_URL);
     const resources = app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources');
+    // Verify concurrently with rendering the first UI, but never enable media operations early.
+    // Attach rejection handling immediately, even if renderer loading takes longer or fails.
+    const verification = verifyEngines(resources, check => {
+      engineStatus = { state: 'checking', integrityVerified: false, check }; broadcast();
+    }).then(paths => ({ ok: true as const, paths }), error => ({ ok: false as const, error }));
+    const nativeVerification = verifyNativeEngine(resources).then(engine => {
+      previewEngineStatus = { state: 'ready', integrityVerified: true, version: engine.version }; broadcast();
+      return { ok: true as const, engine };
+    }, error => {
+      previewEngineStatus = { state: 'error', integrityVerified: false, error: publicError(error) }; broadcast();
+      return { ok: false as const, error };
+    });
+    previewCheck = nativeVerification;
+    await window.loadURL(developmentUrl ?? APP_URL);
     try {
-      engines = await verifyEngines(resources);
+      const [verified, preview] = await Promise.all([verification, nativeVerification]);
+      if (shuttingDown) return;
+      if (!verified.ok) throw verified.error;
+      engines = verified.paths;
       editor = new MediaSession(engines, sessionTemp, mediaResources, message => { warnings.push(message); broadcast(); }, progress => {
         if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send(MEDIA_CHANNELS.progress, progress);
-      }, publications, [temp.root]);
+      }, publications, [temp.root], preview.ok ? {
+        helper: preview.engine.helper,
+        verify: async () => {
+          try { await verifyNativeFiles(resources); }
+          catch (error) { previewEngineStatus = { state: 'error', integrityVerified: false, error: publicError(error) }; broadcast(); throw error; }
+        },
+        frame: frame => { if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send(NATIVE_CHANNELS.frame, frame); },
+        status: status => { if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send(NATIVE_CHANNELS.status, status); },
+      } : undefined);
       engineStatus = { state: 'ready', version: engines.build, integrityVerified: true };
     } catch (error) { engineStatus = { state: 'error', integrityVerified: false, error: publicError(error) }; }
     broadcast();

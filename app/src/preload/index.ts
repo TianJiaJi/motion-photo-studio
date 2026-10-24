@@ -3,17 +3,33 @@ import { CHANNELS } from '../shared/contracts.ts';
 import { MEDIA_CHANNELS } from '../shared/media-ipc.ts';
 import type { AppSnapshot, DesktopAPI } from '../shared/contracts.ts';
 import type { ExportProgress } from '../shared/export.ts';
+import { NATIVE_CHANNELS } from '../shared/native-preview.ts';
+import type { NativePreviewAPI } from '../shared/media-ipc.ts';
+import type { PreviewPixels, PreviewStatus } from '../shared/native-preview.ts';
 
 const api: DesktopAPI = {
   security: Object.freeze({ sandboxed: process.sandboxed === true, contextIsolated: process.contextIsolated === true }),
   media: Object.freeze({
+    native: Object.freeze({
+      prepare: (request: Parameters<NativePreviewAPI['prepare']>[0]) => ipcRenderer.invoke(NATIVE_CHANNELS.prepare, request),
+      control: (request: Parameters<NativePreviewAPI['control']>[0]) => ipcRenderer.invoke(NATIVE_CHANNELS.control, request),
+      acknowledge: (request: Parameters<NativePreviewAPI['acknowledge']>[0]) => ipcRenderer.invoke(NATIVE_CHANNELS.ack, request),
+      capture: (request: Parameters<NativePreviewAPI['capture']>[0]) => ipcRenderer.invoke(NATIVE_CHANNELS.capture, request),
+      onFrame: (listener: (frame: PreviewPixels) => void) => {
+        const handler = (_event: unknown, frame: PreviewPixels) => listener(frame);
+        ipcRenderer.on(NATIVE_CHANNELS.frame, handler);
+        return () => { ipcRenderer.removeListener(NATIVE_CHANNELS.frame, handler); };
+      },
+      onStatus: (listener: (status: PreviewStatus) => void) => {
+        const handler = (_event: unknown, status: PreviewStatus) => listener(status);
+        ipcRenderer.on(NATIVE_CHANNELS.status, handler);
+        return () => { ipcRenderer.removeListener(NATIVE_CHANNELS.status, handler); };
+      },
+    }),
     open: () => ipcRenderer.invoke(MEDIA_CHANNELS.open),
     cancelImport: () => ipcRenderer.invoke(MEDIA_CHANNELS.cancelImport),
-    preview: (request: Parameters<DesktopAPI['media']['preview']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.preview, request),
-    frame: (request: Parameters<DesktopAPI['media']['frame']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.frame, request),
     thumbnails: (request: Parameters<DesktopAPI['media']['thumbnails']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.thumbnails, request),
     uploadCover: (request: Parameters<DesktopAPI['media']['uploadCover']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.uploadCover, request),
-    captureCover: (request: Parameters<DesktopAPI['media']['captureCover']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.captureCover, request),
     analyze: (request: Parameters<DesktopAPI['media']['analyze']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.analyze, request),
     renderDraft: (request: Parameters<DesktopAPI['media']['renderDraft']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.renderDraft, request),
     saveDraft: (request: Parameters<DesktopAPI['media']['saveDraft']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.saveDraft, request),

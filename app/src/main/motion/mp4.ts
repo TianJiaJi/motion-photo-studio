@@ -4,13 +4,17 @@ import { fromBigInt, readExactly, safeInteger } from './io.ts';
 export type Mp4Box = { type: string; offset: number; size: number };
 
 // ISO BMFF top-level box walk; mdat is skipped, not loaded. Extended size is 64-bit.
-export async function inspectMp4(file: FileHandle, start: number, length: number): Promise<Mp4Box[]> {
+export async function inspectMp4(file: FileHandle, start: number, length: number, options: { signal?: AbortSignal; maximumBoxes?: number } = {}): Promise<Mp4Box[]> {
   safeInteger(start, 'MP4 start'); safeInteger(length, 'MP4 length', 8);
+  const maximumBoxes = options.maximumBoxes ?? 100000;
+  safeInteger(maximumBoxes, 'MP4 box limit', 1);
+  if (maximumBoxes > 100000) throw new Error('Excessive MP4 box limit');
   const end = safeInteger(start + length, 'MP4 end');
   const boxes: Mp4Box[] = [];
   let position = start;
   while (position < end) {
-    if (boxes.length >= 100000) throw new Error('Excessive MP4 boxes');
+    options.signal?.throwIfAborted();
+    if (boxes.length >= maximumBoxes) throw new Error('Excessive MP4 boxes');
     if (end - position < 8) throw new Error('Truncated MP4 box header');
     const header = await readExactly(file, position, 8);
     let size = header.readUInt32BE();

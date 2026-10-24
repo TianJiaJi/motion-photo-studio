@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron } from '@playwright/test';
-import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { runProcess } from '../../src/main/media/runner.ts';
@@ -12,9 +12,10 @@ function environment(userData: string): Record<string, string> {
   env.PATH = `${env.SystemRoot ?? 'C:\\Windows'}\\System32`; env.MOTION_USER_DATA_DIR = userData; return env;
 }
 
-test('offline editor imports through native dialog, streams, steps frames, crops, selects covers and cleans up', async () => {
+test('offline editor imports through native dialog, paints Canvas, steps frames, crops, selects covers and cleans up', async () => {
   test.setTimeout(180000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-editor-ui-'));
+  const evidenceRoot = resolve(`../artifacts/native-preview/editor-${Date.now()}`); await mkdir(evidenceRoot, {recursive:true});
   const userData = join(directory, 'user-data');
   const input = join(directory, '测试片段.mp4'); const cover = join(directory, '自定义封面.png');
   const executable = resolve('resources/bin/ffmpeg.exe');
@@ -35,6 +36,18 @@ test('offline editor imports through native dialog, streams, steps frames, crops
     }, [input, cover, null, input]);
     const page = await instance.firstWindow();
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    await page.evaluate(()=>{
+      const rows:unknown[]=[];(window as any).__editorEvidence=rows;
+      const record=(row:unknown)=>{rows.push(row);if(rows.length>2048)rows.shift();};
+      for(const type of ['focusin','focusout','input','change','keydown','keyup','pointerdown','pointerup'])document.addEventListener(type,event=>{
+        const element=event.target as HTMLInputElement;
+        record({type,time:performance.now(),label:element?.getAttribute?.('aria-label'),testid:element?.dataset?.testid,value:element?.value,
+          key:(event as KeyboardEvent).key,buttons:(event as PointerEvent).buttons,x:(event as PointerEvent).clientX,y:(event as PointerEvent).clientY,
+          active:(document.activeElement as HTMLElement)?.getAttribute('aria-label'),playhead:document.querySelector('[data-testid="playhead"]')?.textContent});
+      },true);
+      window.motion.media.native.onFrame(frame=>record({type:'frame',time:performance.now(),epoch:frame.epoch,frameId:frame.frameId,timeUs:frame.timeUs}));
+      window.motion.media.native.onStatus(status=>record({type:'status',time:performance.now(),...status}));
+    });
     await instance.context().setOffline(true);
     await expect(page.getByTestId('open-video')).toBeEnabled({ timeout: 60000 });
     await expect(page.getByRole('dialog')).not.toBeVisible();
@@ -44,8 +57,11 @@ test('offline editor imports through native dialog, streams, steps frames, crops
     await page.screenshot({ path: resolve('../artifacts/desktop/m4-ui-welcome.png') });
     await page.getByTestId('open-video').click();
     await expect(page.getByTestId('asset-name')).toHaveText('测试片段.mp4');
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2);
-    const originalUrl = await page.getByTestId('video-preview').getAttribute('src');
+    const canvas = page.getByTestId('native-preview');
+    await expect(canvas).toHaveAttribute('data-frame-id', /\d+/, { timeout: 60000 });
+    await expect(page.locator('.thumbnails img')).toHaveCount(8);
+    // Original video is no longer exposed as a browser URL; bounded image resources retain Range support.
+    const originalUrl = await page.locator('.thumbnails img').first().getAttribute('src');
     expect(originalUrl).toMatch(/^media:\/\/asset\//);
     const range = await page.evaluate(async url => {
       const response = await fetch(url!, { headers: { Range: 'bytes=0-15' } });
@@ -54,7 +70,7 @@ test('offline editor imports through native dialog, streams, steps frames, crops
     expect(range).toEqual({ status: 206, length: 16 });
     await page.getByLabel('精确定位', { exact: true }).fill('00:00:00.533');
     await page.getByLabel('精确定位', { exact: true }).press('Enter');
-    await expect(page.getByTestId('exact-frame')).toBeVisible();
+    await expect(canvas).toHaveAttribute('data-time-us', '533333');
     await expect(page.getByTestId('playhead')).toHaveText('00:00:00.533');
     await page.getByRole('button', { name: '下一帧', exact: true }).click();
     await expect(page.getByTestId('playhead')).toHaveText('00:00:00.566');
@@ -96,7 +112,7 @@ test('offline editor imports through native dialog, streams, steps frames, crops
     // Scrubbing the white playhead must not change the selected interval.
     const beforeScrub = [await trimStart.getAttribute('aria-valuenow'), await trimEnd.getAttribute('aria-valuenow')];
     await page.mouse.click(track.x + track.width * .5, track.y + track.height / 2);
-    await expect(page.getByTestId('exact-frame')).toBeVisible();
+    await expect.poll(async () => Math.abs(Number(await canvas.getAttribute('data-time-us')) - 6000000)).toBeLessThan(40000);
     expect([await trimStart.getAttribute('aria-valuenow'), await trimEnd.getAttribute('aria-valuenow')]).toEqual(beforeScrub);
     // Zoom/pan mapping uses viewport time, not the full duration; keyboard endpoints can restore full range.
     await page.getByLabel('时间轴缩放', { exact: true }).focus(); await page.getByLabel('时间轴缩放', { exact: true }).press('ArrowRight');
@@ -112,42 +128,54 @@ test('offline editor imports through native dialog, streams, steps frames, crops
     await page.getByLabel('截取结束', { exact: true }).fill('00:00:03.000'); await page.getByLabel('截取结束', { exact: true }).press('Enter');
     await page.getByLabel('精确定位', { exact: true }).fill('00:00:01.000'); await page.getByLabel('精确定位', { exact: true }).press('Enter');
     await expect(page.getByTestId('playhead')).toHaveText('00:00:01.000');
+    await expect(canvas).toHaveAttribute('data-time-us','1000000');
+    const sameValueEpoch=Number(await canvas.getAttribute('data-epoch'));
+    await page.getByLabel('精确定位', { exact: true }).fill('00:00:01.000');await page.getByLabel('精确定位', { exact: true }).press('Enter');
+    await expect.poll(async()=>Number(await canvas.getAttribute('data-epoch'))).toBeGreaterThan(sameValueEpoch);
+    await expect(canvas).toHaveAttribute('data-time-us','1000000');
     await page.getByLabel('输出帧率', { exact: true }).selectOption('24');
     await page.getByLabel('分辨率', { exact: true }).selectOption('1080');
     await expect(page.getByLabel('输出帧率', { exact: true })).toHaveValue('24');
     await page.getByLabel('保留音轨', { exact: true }).uncheck();
-    // Visual playback test is muted; audible correctness remains a separate acceptance check.
-    await page.getByTestId('video-preview').evaluate(node => {
-      const player = node as HTMLVideoElement; player.muted = true;
-      let lastPtsUs: number | undefined; let handle = 0;
-      const observe = (_now: number, metadata: VideoFrameCallbackMetadata) => {
-        lastPtsUs = Math.floor(metadata.mediaTime * 1000000);
-        handle = player.requestVideoFrameCallback(observe);
-      };
-      handle = player.requestVideoFrameCallback(observe);
-      document.querySelector('[data-testid="play-video"]')!.addEventListener('click', () => {
-        // Capture independently before React's pause handler, not from application state or the wall clock.
-        if (!player.paused) {
-          document.body.dataset.pauseFrameUs = String(lastPtsUs);
-          player.cancelVideoFrameCallback(handle);
-        }
-      }, { capture: true });
+    // Independently observe IPC pixel payloads and compare the actual Canvas readback, not a wall clock.
+    // This muted visual check does not establish physical audio/video latency.
+    await page.evaluate(() => {
+      const rows: {frameId:number;timeUs:number;hash:number}[]=[];
+      (window as any).__paintEvidence=rows;
+      window.motion.media.native.onFrame(frame=>{
+        let hash=2166136261;for(const byte of frame.pixels)hash=Math.imul(hash^byte,16777619)>>>0;
+        rows.push({frameId:frame.frameId,timeUs:frame.timeUs,hash});if(rows.length>240)rows.shift();
+      });
     });
+    const seekField=page.getByLabel('精确定位',{exact:true});
+    await expect(seekField).toHaveValue('00:00:01.000');
+    await seekField.fill('00:00:01.000'); // An explicit same-value input may not fire React onChange.
+    // Start real native playback without blurring the field: isolate incoming-prop/input ordering.
+    // Actual pointer-capture acceptance remains in the separate native-preview tests.
+    await page.getByTestId('play-video').evaluate(node=>(node as HTMLButtonElement).click());
+    await expect(seekField).toBeFocused();
+    await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(1100000);
+    const whileTyping=Number(await canvas.getAttribute('data-time-us'));
+    await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(whileTyping+100000);
+    await expect(seekField).toHaveValue('00:00:01.000'); // Native frame updates must not clobber an active draft.
+    await seekField.press('Enter');await expect(canvas).toHaveAttribute('data-time-us','1000000');
+    await expect(page.getByTestId('play-video')).toHaveText('播放选段');
     await page.getByTestId('play-video').click();
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).currentTime)).toBeGreaterThan(1.1);
+    await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(1100000);
     await page.getByTestId('play-video').click();
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).paused)).toBe(true);
-    const pausedTime = await page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).currentTime);
-    const displayedTime = parseTime(await page.getByTestId('playhead').innerText()) / 1000000;
-    const presentedUs = Number(await page.evaluate(() => document.body.dataset.pauseFrameUs));
-    expect(Number.isFinite(presentedUs)).toBe(true);
-    expect(displayedTime).toBe(Math.floor(presentedUs / 1000) / 1000);
-    // A submitted video frame may lead/lag currentTime; the contract is the frame PTS, not a 10 ms clock match.
-    expect(Math.abs(pausedTime - displayedTime)).toBeLessThan(1 / 30 + 0.005);
-    await page.getByLabel('强制兼容预览', { exact: true }).check();
-    await expect(page.getByTestId('video-preview')).not.toHaveAttribute('src', originalUrl!);
-    await expect(page.locator('.preview-caption strong')).toContainText('低清代理');
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2);
+    await expect(page.getByTestId('play-video')).toHaveText('播放选段');
+    const presented = await canvas.evaluate(node=>{
+      const c=node as HTMLCanvasElement;let hash=2166136261;
+      for(const byte of c.getContext('2d')!.getImageData(0,0,c.width,c.height).data)hash=Math.imul(hash^byte,16777619)>>>0;
+      const frameId=Number(c.dataset.frameId),timeUs=Number(c.dataset.timeUs);
+      const received=(window as any).__paintEvidence.findLast((row:any)=>row.frameId===frameId);
+      return {hash,timeUs,received};
+    });
+    expect(presented.received).toBeDefined();expect(presented.hash).toBe(presented.received.hash);expect(presented.timeUs).toBe(presented.received.timeUs);
+    await expect.poll(async()=>parseTime(await page.getByTestId('playhead').innerText())).toBe(Math.floor(presented.timeUs/1000)*1000);
+    await expect(page.getByTestId('video-preview')).toHaveCount(0);
+    await expect(page.getByLabel('强制兼容预览', { exact: true })).toHaveCount(0);
+    await expect(page.locator('.preview-caption strong')).toContainText('原片解码');
     await page.getByLabel('时间轴缩放', { exact: true }).focus(); await page.getByLabel('时间轴缩放', { exact: true }).press('ArrowRight');
     await expect(page.getByLabel('时间轴缩放', { exact: true })).toHaveValue('1');
     await expect(page.getByLabel('时间轴视口起点', { exact: true })).toBeVisible();
@@ -172,13 +200,22 @@ test('offline editor imports through native dialog, streams, steps frames, crops
     expect(await readdir(join(userData, 'media-sessions'))).toEqual([]);
     expect(await sha256(input)).toBe(sourceHash); expect(await sha256(cover)).toBe(coverHash);
     await page.getByTestId('open-video').click(); await expect(page.getByTestId('asset-name')).toHaveText('测试片段.mp4');
+    await writeFile(join(evidenceRoot,'events.json'),JSON.stringify(await page.evaluate(()=>(window as any).__editorEvidence),null,2));
     await instance.close(); instance = undefined;
     expect(await readdir(join(userData, 'media-sessions'))).toEqual([]);
     expect(errors).toEqual([]);
+  } catch(error) {
+    await writeFile(join(evidenceRoot,'failure.json'),JSON.stringify({error:String(error)},null,2));
+    const page=instance?.windows()[0];if(page){
+      await writeFile(join(evidenceRoot,'events.json'),JSON.stringify(await page.evaluate(()=>(window as any).__editorEvidence).catch(()=>null),null,2));
+      await writeFile(join(evidenceRoot,'dom.txt'),await page.locator('body').innerText().catch(()=>''));
+      await page.screenshot({path:join(evidenceRoot,'failure.png')}).catch(()=>{});
+    }
+    throw error;
   } finally { if (instance) await instance.close(); await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
 });
 
-test('editor maps rotated display coordinates, previews HEVC through a proxy and gates HDR consent', async () => {
+test('editor maps rotated display coordinates, previews HEVC natively and gates HDR preparation consent', async () => {
   test.setTimeout(180000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-editor-formats-'));
   const userData = join(directory, 'user-data');
@@ -200,9 +237,13 @@ test('editor maps rotated display coordinates, previews HEVC through a proxy and
     await instance.context().setOffline(true);
     await expect(page.getByTestId('open-video')).toBeEnabled({ timeout: 60000 });
     await page.getByTestId('open-video').click(); await expect(page.getByTestId('asset-name')).toHaveText('rotated.mp4');
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => [(node as HTMLVideoElement).videoWidth, (node as HTMLVideoElement).videoHeight])).toEqual([240, 320]);
+    const canvas=page.getByTestId('native-preview');
+    await expect(canvas).toHaveAttribute('data-frame-id', /\d+/, {timeout:60000});
+    await expect.poll(()=>canvas.evaluate(node=>[(node as HTMLCanvasElement).width,(node as HTMLCanvasElement).height])).toEqual([240,320]);
+    const first=await canvas.getAttribute('data-frame-id');
     await page.getByRole('button', { name: '下一帧', exact: true }).click();
-    await expect.poll(() => page.getByTestId('exact-frame').evaluate(node => [(node as HTMLImageElement).naturalWidth, (node as HTMLImageElement).naturalHeight])).toEqual([240, 320]);
+    await expect(canvas).not.toHaveAttribute('data-frame-id',first!);
+    await expect.poll(()=>canvas.evaluate(node=>[(node as HTMLCanvasElement).width,(node as HTMLCanvasElement).height])).toEqual([240,320]);
     await page.getByRole('button', { name: '自由框选', exact: true }).click();
     await page.getByTestId('crop-stage').scrollIntoViewIfNeeded();
     const box = (await page.getByTestId('crop-stage').boundingBox())!;
@@ -215,8 +256,8 @@ test('editor maps rotated display coordinates, previews HEVC through a proxy and
     await page.locator('.editor-sidebar').evaluate(node => { node.scrollTop = 0; });
     await page.screenshot({ path: resolve('../artifacts/desktop/m4-ui-portrait.png') });
     await page.getByTestId('open-video').click(); await expect(page.getByTestId('asset-name')).toHaveText('HEVC.mp4');
-    await expect(page.locator('.preview-caption strong')).toContainText('低清代理');
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2);
+    await expect(canvas).toHaveAttribute('data-frame-id', /\d+/, {timeout:60000});
+    await expect(page.locator('.preview-caption strong')).toContainText('原生低清预览');
     await page.getByLabel('原画质（跟随原片）', { exact: true }).check();
     await page.getByTestId('preview-output').click();
     const matched = page.getByRole('dialog', { name: '输出预览', exact: true });
@@ -230,12 +271,19 @@ test('editor maps rotated display coordinates, previews HEVC through a proxy and
     await expect(page.getByLabel('原画质（跟随原片）', { exact: true })).not.toBeChecked();
     const consent = page.getByLabel('同意 HDR 转 SDR', { exact: true });
     await expect(consent).not.toBeChecked(); await expect(page.getByTestId('play-video')).toBeDisabled();
-    await expect(page.getByTestId('video-preview')).not.toHaveAttribute('src');
+    await expect(canvas).not.toHaveAttribute('data-frame-id');
     await consent.check();
-    await expect(page.locator('.preview-caption strong')).toContainText('低清代理');
-    await expect.poll(() => page.getByTestId('video-preview').evaluate(node => (node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2);
+    await expect(page.locator('.preview-caption strong')).toContainText('兼容素材');
+    await expect(canvas).toHaveAttribute('data-frame-id', /\d+/, {timeout:60000});
     await consent.uncheck(); await expect(page.getByTestId('play-video')).toBeDisabled();
-    await expect(page.getByTestId('video-preview')).not.toHaveAttribute('src');
+    await expect(canvas).not.toHaveAttribute('data-frame-id');
+    await expect.poll(()=>canvas.evaluate(node=>{const c=node as HTMLCanvasElement;return c.getContext('2d')!.getImageData(0,0,c.width,c.height).data.every(byte=>byte===0);})).toBe(true);
+    await expect(page.getByTestId('displayed-frame')).toHaveCount(0);
+    // Re-enabling must reuse the controller's monotonic epoch and drain dropped-frame ACKs.
+    await consent.check();await expect(canvas).toHaveAttribute('data-frame-id', /\d+/, {timeout:60000});
+    await expect(page.getByTestId('play-video')).toBeEnabled();
+    await page.getByRole('button', { name: '下一帧', exact: true }).click();
+    await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(0);
     await page.getByRole('button', { name: '关闭素材', exact: true }).click();
     await expect(page.getByTestId('editor')).toHaveCount(0);
     expect(await readdir(join(userData, 'media-sessions'))).toEqual([]);

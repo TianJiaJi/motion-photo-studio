@@ -6,15 +6,16 @@ import type { Rational } from '../../shared/editor.ts';
 import { runProcess } from './runner.ts';
 
 export type ExtractedFrame = { path: string; pts: string; timeBase: Rational; actualTimeUs: number };
-export function normalizedFrameFilters(info: MediaInfo, thumbnail = false): string[] {
+export function normalizedFrameFilters(info: MediaInfo, thumbnail = false, maximumEdge?: number): string[] {
+  if (maximumEdge !== undefined && (!Number.isSafeInteger(maximumEdge) || maximumEdge < 2)) throw new Error('Invalid preview scale');
   const filters: string[] = [];
   if (info.hdr) filters.push('zscale=t=linear:npl=100', 'format=gbrpf32le', 'zscale=p=bt709',
     'tonemap=tonemap=hable:desat=0', 'zscale=t=bt709:m=bt709:r=tv');
-  filters.push(`scale=${info.displayWidth}:${info.displayHeight}`, 'setsar=1');
-  if (thumbnail) {
-    const ratio = Math.min(1, 180 / Math.max(info.displayWidth, info.displayHeight));
+  const limit = thumbnail ? 180 : maximumEdge;
+  if (limit !== undefined) {
+    const ratio = Math.min(1, limit / Math.max(info.displayWidth, info.displayHeight));
     filters.push(`scale=${Math.max(2, Math.floor(info.displayWidth * ratio / 2) * 2)}:${Math.max(2, Math.floor(info.displayHeight * ratio / 2) * 2)}`, 'setsar=1');
-  }
+  } else filters.push(`scale=${info.displayWidth}:${info.displayHeight}`, 'setsar=1');
   return filters;
 }
 

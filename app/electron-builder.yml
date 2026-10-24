@@ -17,6 +17,9 @@ extraResources:
     filter:
       - ffmpeg.exe
       - ffprobe.exe
+      - motion-preview.exe
+  - from: resources/native-preview-manifest.json
+    to: native-preview-manifest.json
   - from: resources/engine-manifest.json
     to: engine-manifest.json
   - from: resources/licenses

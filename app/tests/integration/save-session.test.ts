@@ -54,6 +54,6 @@ test('session saves only its exact current draft, reports commit receipts and re
     await assert.rejects(manager.saveDraft(reopened.id, nextDraft.id, randomUUID(), join(outputDir, 'deleted.jpg')), { code: 'SOURCE_CHANGED' });
     await assert.rejects(access(input), { code: 'ENOENT' });
     await manager.close(reopened.id); assert.deepEqual(await readdir(store.root), []); assert.deepEqual(await readdir(journal.root), []);
-    assert.deepEqual(await readdir(outputDir), ['saved.jpg']); await validateMotion(final, true); resources.dispose();
+    assert.deepEqual(await readdir(outputDir), ['saved.jpg']); await validateMotion(final, true); await resources.dispose();
   } finally { await manager?.shutdown(); await temp.cleanup(); }
 });

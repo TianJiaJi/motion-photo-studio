@@ -2,8 +2,11 @@ app/node_modules/
 app/dist/
 app/out/
 app/resources/bin/
+app/resources/native-preview-manifest.json
+app/resources/licenses/native-preview/
 app/test-results/
 app/playwright-report/
+native/**/target/
 artifacts/
 *.log
 

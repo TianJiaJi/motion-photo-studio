@@ -10,10 +10,13 @@ import { mediaInfo } from './info.ts';
 
 // This bounds preview work only. It never constrains source or export duration.
 export const PREVIEW_WINDOW_US = 12000000;
+export const INITIAL_PREVIEW_WINDOW_US = 3000000;
 export async function createPreview(options: {
-  engines: EnginePaths; input: string; output: string; info: MediaInfo; timeUs: number; signal: AbortSignal;
+  engines: EnginePaths; input: string; output: string; info: MediaInfo; timeUs: number; signal: AbortSignal; windowUs?: number;
 }): Promise<{ startUs: number; endUs: number; mediaStartUs: number }> {
   const { info, signal, engines } = options;
+  const windowUs = options.windowUs ?? PREVIEW_WINDOW_US;
+  if (!Number.isSafeInteger(windowUs) || windowUs <= 0 || windowUs > PREVIEW_WINDOW_US) throw new Error('Invalid preview window');
   const startImage = `${options.output}.start.jpg`;
   await writeFile(options.output, '', { flag: 'wx' });
   let succeeded = false;
@@ -23,16 +26,15 @@ export async function createPreview(options: {
       info, timeUs: Math.max(0, options.timeUs - 2000000), thumbnail: true, signal });
     anchorCreated = true;
     const startUs = anchor.actualTimeUs;
-    const durationUs = Math.min(PREVIEW_WINDOW_US, info.durationUs - startUs);
+    const durationUs = Math.min(windowUs, info.durationUs - startUs);
     if (durationUs <= 0) throw new Error('No playable preview interval');
-    const ratio = Math.min(1, 1280 / Math.max(info.displayWidth, info.displayHeight));
-    const width = Math.max(2, Math.floor(info.displayWidth * ratio / 2) * 2);
-    const height = Math.max(2, Math.floor(info.displayHeight * ratio / 2) * 2);
-    const filters = [...normalizedFrameFilters(info), `scale=${width}:${height}`, 'setsar=1'];
+    // Drop surplus preview frames before expensive HDR/geometry conversion, then scale once.
+    // These are preview-only optimizations; source/exact frames/export never use this preset.
+    const filters = ['fps=30', ...normalizedFrameFilters(info, false, 1280)];
     await runProcess(engines.ffmpeg, ['-hide_banner', '-v', 'error', '-nostdin', '-y',
       '-protocol_whitelist', 'file,pipe', '-seek_timestamp', '1', '-ss', usToSeconds(info.startUs + startUs),
       '-i', options.input, '-t', usToSeconds(durationUs), '-map', `0:${info.videoIndex}`, '-map', '0:a:0?',
-      '-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-pix_fmt', 'yuv420p',
+      '-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-pix_fmt', 'yuv420p',
       '-r', '30', '-fps_mode', 'cfr', '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
       '-map_metadata', '-1', '-map_chapters', '-1', '-movflags', '+faststart', options.output], { signal });
     const outputProbe = await probeMedia(options.output, { executable: engines.ffprobe, signal });

@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron } from '@playwright/test';
-import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runProcess } from '../../src/main/media/runner.ts';
@@ -11,7 +11,7 @@ function environment(userData: string): Record<string, string> {
   for (const key of Object.keys(env)) if (['path', 'electron_run_as_node', 'electron_renderer_url', 'ffmpeg_path', 'ffprobe_path'].includes(key.toLowerCase())) delete env[key];
   env.PATH = `${env.SystemRoot ?? 'C:\\Windows'}\\System32`; env.MOTION_USER_DATA_DIR = userData; return env;
 }
-test('source-matching preset exports HEVC60 plus PCM without manual parameter setup and failures remain visible', async () => {
+test('source-matching preset converts HEVC60 plus PCM to audible AAC in the final photo and failures remain visible', async () => {
   test.setTimeout(180000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-source-preset-')); const output = join(directory, 'output'); await mkdir(output);
   const input = join(directory, 'hevc-pcm.mp4'); const surround = join(directory, 'surround.mp4'); const final = join(output, 'source-matched.jpg');
@@ -39,14 +39,21 @@ test('source-matching preset exports HEVC60 plus PCM without manual parameter se
     const dialog = page.getByRole('dialog', { name: '输出预览', exact: true }); await expect(dialog).toBeVisible();
     await expect(page.getByTestId('save-motion')).toBeEnabled({ timeout: 60000 });
     await expect(page.getByTestId('output-proof')).toContainText('原画质预设'); await expect(page.getByTestId('output-proof')).toContainText('非严格无损');
-    await expect(page.getByTestId('source-audio-parameters')).toContainText('pcm_s16le · 44100 Hz · 2 声道');
-    await expect(page.getByTestId('pcm-preserved')).toBeVisible(); expect(await readdir(output)).toEqual([]);
+    await expect(page.getByTestId('source-audio-parameters')).toContainText('aac · 44100 Hz · 2 声道');
+    await expect(page.getByTestId('source-audio-compatibility')).toContainText('AAC-LC'); expect(await readdir(output)).toEqual([]);
     await page.getByTestId('save-motion').click(); await expect(page.getByTestId('save-result')).toContainText('已保存 source-matched.jpg');
     const inspected = await validateMotion(final, true); const video = join(directory, 'extracted.mp4'); await extractRange(final, video, inspected.videoStart, inspected.videoEnd);
     const metadata = await probeMedia(video, { executable: resolve('resources/bin/ffprobe.exe') });
     const v = metadata.streams.find(stream => stream.codec_type === 'video')!; const a = metadata.streams.find(stream => stream.codec_type === 'audio')!;
-    expect([v.width, v.height, v.avg_frame_rate]).toEqual([640, 360, '60/1']); expect([a.codec_name, a.sample_rate, a.channels]).toEqual(['pcm_s16le', '44100', 2]);
+    expect([v.width, v.height, v.avg_frame_rate]).toEqual([640, 360, '60/1']); expect([a.codec_name, a.profile, a.sample_rate, a.channels]).toEqual(['aac', 'LC', '44100', 2]);
     await ff(['-xerror', '-err_detect', 'explode', '-i', video, '-map', '0:v', '-map', '0:a', '-f', 'null', '-']);
+    // Verify sound in the MP4 extracted from the FINAL JPEG, not only in the preview draft.
+    const raw=join(directory,'final-audio.s16');await ff(['-i',video,'-map','0:a:0','-af','atrim=end=3','-c:a','pcm_s16le','-f','s16le',raw]);
+    const samples=await readFile(raw);expect(samples.length).toBe(3*44100*4);
+    let sine=0,cosine=0,energy=0;const frames=samples.length/4;
+    for(let i=0;i<frames;i++){const value=samples.readInt16LE(i*4)/32768,angle=2*Math.PI*523*i/44100;sine+=value*Math.sin(angle);cosine+=value*Math.cos(angle);energy+=value*value;}
+    const rms=Math.sqrt(energy/frames),toneRms=Math.SQRT2*Math.hypot(sine,cosine)/frames;
+    expect(rms).toBeGreaterThan(0.01);expect(toneRms/rms).toBeGreaterThan(0.8);
     await mkdir(resolve('../artifacts/desktop'), { recursive: true }); await page.screenshot({ path: resolve(`../artifacts/desktop/m5-source-preset-${process.env.MOTION_PACKAGED_EXE ? 'packaged' : 'development'}.png`) });
     await page.getByRole('button', { name: '关闭输出预览', exact: true }).click(); await page.getByLabel('原画质（跟随原片）', { exact: true }).uncheck();
     await expect(page.getByLabel('输出帧率', { exact: true })).toHaveValue('30'); await expect(page.getByLabel('分辨率', { exact: true })).toHaveValue('1080');

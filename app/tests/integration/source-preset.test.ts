@@ -7,6 +7,7 @@ import { analyzeExport, renderExportDraft } from '../../src/main/media/export-pi
 import { openSource } from '../../src/main/media/source.ts';
 import { sha256 } from '../../src/main/motion/io.ts';
 import { probeMedia } from '../../src/main/media/probe.ts';
+import { preservePcmAudio } from '../../src/main/media/pcm-audio.ts';
 
 for (const audioCodec of ['pcm_s16le', 'aac']) test(`source-matching exports HEVC 60fps + ${audioCodec} with original resolution/rate/channels and real decode`, async () => {
   const temp = await tempFiles();
@@ -22,13 +23,22 @@ for (const audioCodec of ['pcm_s16le', 'aac']) test(`source-matching exports HEV
     const draft = await renderExportDraft({ source, analysis, image: { fit: 'cover', background: '#000000' }, directory, engines, signal });
     assert.equal(draft.report.proof.kind, 'encode'); if (draft.report.proof.kind === 'encode') assert.equal(draft.report.proof.sourceMatched, true);
     const metadata = await probeMedia(draft.video.path, { executable: engines.ffprobe }); const v = metadata.streams.find(s => s.codec_type === 'video')!; const a = metadata.streams.find(s => s.codec_type === 'audio')!;
-    assert.deepEqual([v.width, v.height, v.avg_frame_rate], [320, 180, '60/1']); assert.deepEqual([a.codec_name, a.sample_rate, a.channels], [audioCodec, '44100', 2]);
+    assert.deepEqual([v.width, v.height, v.avg_frame_rate], [320, 180, '60/1']); assert.deepEqual([a.codec_name, a.profile, a.sample_rate, a.channels], ['aac', 'LC', '44100', 2]);
     await runProcess(engines.ffmpeg, ['-v', 'error', '-nostdin', '-xerror', '-err_detect', 'explode', '-i', draft.video.path, '-map', '0:v', '-map', '0:a', '-f', 'null', '-']);
+    const originalRaw = temp.file('source.raw'), actualRaw = temp.file('actual.raw');
+    await runProcess(engines.ffmpeg,['-v','error','-nostdin','-n','-i',input,'-map','0:a','-c:a','pcm_s16le','-f','s16le',originalRaw]);
+    await runProcess(engines.ffmpeg,['-v','error','-nostdin','-n','-i',draft.video.path,'-map','0:a','-af','atrim=end=1','-c:a','pcm_s16le','-f','s16le',actualRaw]);
+    const expected=(await readFile(originalRaw)).subarray(44100*4,88200*4),actual=await readFile(actualRaw);
+    assert.equal(actual.length,expected.length,'The selected one-second audio interval must remain complete');
+    let energy=0,error=0;for(let i=0;i<actual.length;i+=2){const a=actual.readInt16LE(i),b=expected.readInt16LE(i);energy+=b*b;error+=(a-b)**2;}
+    assert.ok(Math.sqrt(energy/(actual.length/2))/32768>0.01,'Reference contains audible signal');
+    assert.ok(10*Math.log10(energy/Math.max(error,1))>20,'AAC must preserve the selected source waveform, not merely contain an audio stream');
     if (audioCodec === 'pcm_s16le') {
-      const originalRaw = temp.file('source.raw'); const actualRaw = temp.file('actual.raw');
-      for (const [path, output] of [[input, originalRaw], [draft.video.path, actualRaw]]) await runProcess(engines.ffmpeg,
-        ['-v', 'error', '-nostdin', '-n', '-i', path!, '-map', '0:a', '-c:a', 'pcm_s16le', '-f', 's16le', output!]);
-      assert.deepEqual(await readFile(actualRaw), (await readFile(originalRaw)).subarray(44100 * 4, 88200 * 4), 'actual output PCM samples equal exact selected source bytes');
+      // Keep the independent PCM utility's exact-byte guarantee; it is no longer the source-preset export policy.
+      assert.equal(analysis.plan?.kind,'encode');if(analysis.plan?.kind!=='encode')throw new Error('Missing encode plan');
+      const pcm=await preservePcmAudio({source,index:1,...analysis.plan.value,output:temp.file('pcm-utility.mp4'),engines,signal});
+      const raw=temp.file('pcm-utility.raw');await runProcess(engines.ffmpeg,['-v','error','-nostdin','-n','-i',pcm.file.path,'-map','0:a','-c:a','pcm_s16le','-f','s16le',raw]);
+      assert.deepEqual(await readFile(raw),expected,'Standalone PCM transport still preserves exact source bytes');
     }
     assert.equal(await sha256(input), originalHash);
     const cancelDir = temp.file('cancel'); await mkdir(cancelDir); const controller = new AbortController();
