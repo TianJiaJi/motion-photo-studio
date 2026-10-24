@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mediaInfo } from '../../src/main/media/info.ts';
-import { videoProcessing } from '../../src/main/media/video-processing.ts';
+import { MOTION_VIDEO_TRANSFER, videoProcessing } from '../../src/main/media/video-processing.ts';
 import type { Stream } from '../../src/main/media/probe.ts';
 const video: Stream = { index: 0, codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080, pix_fmt: 'yuv420p',
   time_base: '1/30', start_pts: 0, duration_ts: 90, color_primaries: 'bt709', color_transfer: 'bt709', color_space: 'bt709', color_range: 'tv' };
@@ -13,6 +13,15 @@ test('normal processing really converts colors and geometry, removes stale side 
   assert.match(result.filters.join(','), /zscale=.*pin=bt709.*p=bt709:t=bt709:m=bt709:r=tv/);
   assert.ok(result.filters.includes('sidedata=mode=delete')); assert.ok(result.filters.includes('format=yuv420p'));
   assert.equal(result.warnings.length, 0);
+});
+test('motion sRGB conversion occurs before quantization without changing the canonical cover intermediate', () => {
+  const canonical = videoProcessing(info(video), video, edits, false);
+  assert.equal(canonical.filters.at(-1), 'setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709');
+  const motion = videoProcessing(info(video), video, edits, false, MOTION_VIDEO_TRANSFER);
+  const conversion = motion.filters.findIndex(filter => filter.startsWith('zscale=pin=bt709:tin=bt709:') && filter.includes(':t=iec61966-2-1:'));
+  assert.ok(conversion >= 0 && conversion < motion.filters.indexOf('format=yuv420p'));
+  assert.equal(motion.filters.at(-1), 'setparams=range=limited:color_primaries=bt709:color_trc=iec61966-2-1:colorspace=bt709');
+  assert.deepEqual(motion.geometry, canonical.geometry);
 });
 test('HDR requires consent; unknown/wide/alpha inputs are not relabeled into a claimed SDR conversion', () => {
   const hdr = { ...video, color_primaries: 'bt2020', color_transfer: 'smpte2084', color_space: 'bt2020nc' };

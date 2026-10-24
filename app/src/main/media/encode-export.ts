@@ -9,7 +9,7 @@ import { assertSource, openSource, type SourceFile } from './source.ts';
 import { probeMedia } from './probe.ts';
 import { mediaInfo } from './info.ts';
 import { planEncodeRange, type EncodeRangePlan } from './encode-plan.ts';
-import { videoProcessing } from './video-processing.ts';
+import { MOTION_VIDEO_TRANSFER, videoProcessing } from './video-processing.ts';
 import { streamProcessLines } from './lines.ts';
 import { encodeAudioDraft, validateEncodedAudio } from './encode-audio.ts';
 
@@ -33,14 +33,15 @@ export async function exportEncodedMedia(options: {
   const probe = await probeMedia(source.path, { executable: engines.ffprobe, signal }); const info = mediaInfo(probe);
   if (probe.streams.filter(s => s.codec_type === 'video' && !s.disposition?.attached_pic).length !== 1) throw new Error('多个主视频轨尚需明确选择，不能静默丢弃。');
   const video = probe.streams.find(s => s.index === info.videoIndex)!;
-  const processing = videoProcessing(info, video, options.edits, options.hdrConsent);
+  const processing = videoProcessing(info, video, options.edits, options.hdrConsent, MOTION_VIDEO_TRANSFER);
   if (!['omit', 'track'].includes(options.audio.kind)) throw new Error('Explicit audio policy required');
   const audio = options.audio.kind === 'track' ? probe.streams.find(s => s.index === (options.audio as { index: number }).index && s.codec_type === 'audio') : undefined;
   if (options.audio.kind === 'track' && (!audio || !Number.isSafeInteger(audio.channels) || audio.channels! < 1)) throw new Error('所选音轨或声道信息无效。');
   if (!options.matchSourceParameters && audio && audio.channels! > 2 && !(options.audio.kind === 'track' && options.audio.downmixStereo)) throw new Error('多声道转为立体声需要明确同意，不会静默降混。');
   const channels = audio ? options.matchSourceParameters ? audio.channels! : Math.min(2, audio.channels!) : 0;
   const sampleRate = audio && options.matchSourceParameters ? Number(audio.sample_rate) : 48000;
-  const warnings = [...processing.warnings, '普通模式会重新编码视频；不保留字幕、附件、章节或原有附加元数据。'];
+  const warnings = [...processing.warnings, '普通模式会重新编码视频；不保留字幕、附件、章节或原有附加元数据。',
+    '视频实际转换为与 JPEG 封面一致的 sRGB 传递函数，保留 BT.709 色域/矩阵及有限范围；目标设备播放效果仍需核对。'];
   if (options.matchSourceParameters) warnings.push('原画质预设：跟随原片显示尺寸与帧时序，采用高保真编码；不是数学上的严格无损。');
   // Source matching preserves rate/channel count, not the source codec. PCM in MP4 can
   // decode in the preview yet be silent in a phone's motion-photo player.
@@ -95,7 +96,7 @@ export async function exportEncodedMedia(options: {
       '-map', `0:${info.videoIndex}`, ...(audio ? ['-map', '1:a:0', '-c:a', 'copy'] : ['-an']), '-vf', filters.join(','),
       '-c:v', 'libx264', '-preset', 'medium', '-crf', String(processing.settings.crf), '-profile:v', processing.settings.crf === 0 ? 'high444' : 'high',
       '-bf', '0', '-pix_fmt', 'yuv420p', '-enc_time_base:v', 'filter', '-fps_mode:v', 'passthrough', '-bsf:v', `setts=duration='${packetDuration}'`,
-      '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv', '-chroma_sample_location', 'left',
+      '-color_primaries', 'bt709', '-color_trc', MOTION_VIDEO_TRANSFER, '-colorspace', 'bt709', '-color_range', 'tv', '-chroma_sample_location', 'left',
       '-map_metadata', '-1', '-map_metadata:s', '-1', '-map_chapters', '-1', '-avoid_negative_ts', 'disabled', '-use_editlist', '1', '-movflags', '+faststart',
       '-progress', 'pipe:1', '-f', 'mp4', output], async line => {
       await progress('video', line);
@@ -111,7 +112,7 @@ export async function exportEncodedMedia(options: {
       || finalInfo.encodedWidth !== processing.geometry.width || finalInfo.encodedHeight !== processing.geometry.height
       || finalInfo.rotation !== 0 || finalInfo.sampleAspectRatio.numerator !== finalInfo.sampleAspectRatio.denominator
       || BigInt(finalInfo.startPts) !== 0n || Math.abs(finalInfo.durationUs - durationUs) > 1
-      || v.color_primaries !== 'bt709' || v.color_transfer !== 'bt709' || v.color_space !== 'bt709' || v.color_range !== 'tv')
+      || v.color_primaries !== 'bt709' || v.color_transfer !== MOTION_VIDEO_TRANSFER || v.color_space !== 'bt709' || v.color_range !== 'tv')
       throw new Error(`普通输出的视频尺寸、色彩或时间范围未通过验证（期望 ${durationUs} µs，实际 ${finalInfo.durationUs} µs）。`);
     let audioReport: EncodeReport['audio'] = null;
     if (audio) audioReport = { ...validateEncodedAudio(a, channels, durationUs, sampleRate), codec: 'aac' };

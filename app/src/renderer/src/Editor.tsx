@@ -403,6 +403,7 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
         <div><h3>照片封面</h3><img data-testid="output-cover" src={draft.coverUrl} alt="处理后的照片封面" /></div></div>
         <p className="hint">{draft.width} × {draft.height} · {formatTime(draft.durationUs)} · {draft.coverTimestampUs === -1 ? '独立封面，无对应视频帧' : `封面对应 ${formatTime(draft.coverTimestampUs)}`}</p>
         <p data-testid="output-proof" className="draft-proof">{draft.proof.kind === 'copy' ? '视频原画：压缩包与时间戳对照、完整解码已通过，视频没有重新编码。JPEG 封面另行编码。' : draft.proof.sourceMatched ? '原画质预设：尺寸/帧时序跟随原片，高保真编码，非严格无损。输出已完整解码检查。' : '精确模式：视频已重新编码，输出配置与完整解码已检查。'}</p>
+        {draft.proof.kind === 'encode' && <p className="hint" data-testid="output-color-compatibility">视频与封面统一采用 sRGB 色彩处理；目标设备播放效果仍需核对。</p>}
         {draft.proof.kind === 'encode' && draft.proof.sourceMatched && <p className="hint" data-testid="source-audio-parameters">音频：{draft.proof.audioCodec ?? '无音轨'} · {draft.proof.audioSampleRate ?? '—'} Hz · {draft.proof.audioChannels ?? 0} 声道</p>}
         {draft.proof.kind === 'encode' && draft.proof.sourceMatched && draft.proof.audioCodec === 'aac' && <p className="hint" data-testid="source-audio-compatibility">音频采用 AAC-LC，提高相册播放兼容性；原采样率和声道数保留，非无损音频。目标设备仍需实际验证。</p>}
         {draft.proof.kind === 'copy' && draft.proof.audioTailUs > 0 && <p className="warning" data-testid="audio-tail">完整音频包比视频尾部延长 {(draft.proof.audioTailUs / 1000).toFixed(3)} ms。</p>}

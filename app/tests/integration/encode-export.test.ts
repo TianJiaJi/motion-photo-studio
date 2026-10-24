@@ -8,7 +8,7 @@ import { mediaInfo } from '../../src/main/media/info.ts';
 import { openSource } from '../../src/main/media/source.ts';
 import { planEncodeRange } from '../../src/main/media/encode-plan.ts';
 import { exportEncodedMedia } from '../../src/main/media/encode-export.ts';
-import { videoProcessing } from '../../src/main/media/video-processing.ts';
+import { MOTION_VIDEO_TRANSFER, videoProcessing } from '../../src/main/media/video-processing.ts';
 import { sha256 } from '../../src/main/motion/io.ts';
 const engines = () => ({ ffmpeg: ffmpeg(), ffprobe: ffprobe(), build: 'integration-test' });
 const clip = { startUs: 1010000, endUs: 1990000 };
@@ -37,7 +37,7 @@ for (const kind of ['cfr', 'offset', 'vfr', 'rotated']) test(`normal A/V encodin
     assert.equal(result.report.videoDurationUs, kind === 'vfr' ? 900000 : 966666);
     // CRF 0 permits an exact first-frame raster comparison. Select the independently planned source PTS,
     // without the production seek/trim chain, and apply only the spatial/color processing being tested.
-    const processing = videoProcessing(info, probe.streams.find(s => s.index === info.videoIndex)!, edits, false);
+    const processing = videoProcessing(info, probe.streams.find(s => s.index === info.videoIndex)!, edits, false, MOTION_VIDEO_TRANSFER);
     const expected = await runProcess(ffmpeg(), ['-v', 'error', '-nostdin', '-copyts', '-i', input, '-map', `0:${info.videoIndex}`, '-an',
       '-vf', `select='eq(pts,${plan.startPts})',${processing.filters.join(',')}`, '-frames:v', '1', '-fps_mode', 'passthrough', '-c:v', 'rawvideo', '-f', 'hash', '-hash', 'sha256', '-']);
     const actual = await runProcess(ffmpeg(), ['-v', 'error', '-nostdin', '-i', output, '-map', '0:v', '-an', '-frames:v', '1', '-c:v', 'rawvideo', '-f', 'hash', '-hash', 'sha256', '-']);
@@ -72,7 +72,11 @@ test('normal encoding converts synthetic PQ/HLG only with consent and leaves nor
       await assert.rejects(exportEncodedMedia({ ...options, hdrConsent: false }), { code: 'HDR_CONFIRM_REQUIRED' });
       await assert.rejects(access(options.output), { code: 'ENOENT' });
       const result = await exportEncodedMedia({ ...options, hdrConsent: true });
-      assert.match(result.report.warnings.join(' '), /HDR→SDR/); assert.equal(mediaInfo(await probeMedia(result.file.path)).hdr, false);
+      assert.match(result.report.warnings.join(' '), /HDR→SDR/);
+      const normalized = await probeMedia(result.file.path);
+      assert.equal(mediaInfo(normalized).hdr, false);
+      assert.deepEqual([normalized.streams[0]?.color_primaries, normalized.streams[0]?.color_transfer, normalized.streams[0]?.color_space, normalized.streams[0]?.color_range],
+        ['bt709', 'iec61966-2-1', 'bt709', 'tv']);
     }
   } finally { await temp.cleanup(); }
 });

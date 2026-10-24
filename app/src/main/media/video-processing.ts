@@ -8,6 +8,9 @@ import type { Stream } from './probe.ts';
 // uses an ideal-black gamma-2.4 display interpretation for Rec.709; native multi-gray tests
 // check it against coded luma and an independent sRGB equation. Device appearance is a separate gate.
 export const SDR_RENDERING_INTENT = 'display-referred-ideal-black-gamma-2.4' as const;
+// Motion video uses the same transfer as the sRGB JPEG, with BT.709 primaries/matrix
+// and limited-range YUV transport. This requires pixel conversion, not relabeling.
+export const MOTION_VIDEO_TRANSFER = 'iec61966-2-1' as const;
 const PRIMARIES = new Set(['bt709', 'bt470m', 'bt470bg', 'smpte170m', 'smpte240m', 'bt2020', 'smpte431', 'smpte432', 'jedec-p22', 'ebu3213']);
 const TRANSFERS = new Set(['bt709', 'bt470m', 'bt470bg', 'smpte170m', 'smpte240m', 'linear', 'bt2020-10', 'bt2020-12', 'smpte2084', 'arib-std-b67', 'iec61966-2-1']);
 const MATRICES = new Set(['gbr', 'bt709', 'fcc', 'bt470bg', 'smpte170m', 'smpte240m', 'bt2020nc', 'bt2020c', 'ycgco']);
@@ -41,16 +44,22 @@ export function sdrColorProcessing(info: MediaInfo, stream: Stream, hdrConsent: 
   if (hdr) warnings.push('已按明确同意进行 HDR→SDR 色调映射；不保留 HDR/动态 HDR 附加元数据，视觉效果仍需核对。');
   return { filters, warnings };
 }
-export function videoProcessing(info: MediaInfo, stream: Stream, edits: ProcessingEdits, hdrConsent: boolean) {
+export function videoProcessing(info: MediaInfo, stream: Stream, edits: ProcessingEdits, hdrConsent: boolean,
+  outputTransfer: 'bt709' | typeof MOTION_VIDEO_TRANSFER = 'bt709') {
   const settings = validateExportSettings(edits.settings);
   const geometry = processingGeometry({ mode: 'encode', ...edits }, info);
   const color = sdrColorProcessing(info, stream, hdrConsent);
   const warnings = [...geometry.warnings, ...color.warnings];
+  // Covers retain the canonical BT.709 intermediate and perform their own final RGB
+  // conversion. Encoded motion video opts into sRGB BEFORE 8-bit/chroma quantization;
+  // neither change the canonical default nor apply this transfer twice to a cover.
+  const outputColor = outputTransfer === 'bt709' ? 'zscale=c=left:dither=none'
+    : `zscale=pin=bt709:tin=bt709:min=bt709:rin=tv:p=bt709:t=${outputTransfer}:m=bt709:r=tv:c=left:dither=none:agamma=0`;
   // Retain precision through display/SAR normalization and spatial processing; quantize only afterwards.
   const filters = [...color.filters, `scale=${info.displayWidth}:${info.displayHeight}:flags=lanczos`, 'setsar=1',
     `crop=${geometry.crop!.width}:${geometry.crop!.height}:${geometry.crop!.x}:${geometry.crop!.y}`,
-    `scale=${geometry.width}:${geometry.height}:flags=lanczos`, 'setsar=1', 'zscale=c=left:dither=none', 'format=yuv420p',
-    'sidedata=mode=delete', 'setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709'];
+    `scale=${geometry.width}:${geometry.height}:flags=lanczos`, 'setsar=1', outputColor, 'format=yuv420p',
+    'sidedata=mode=delete', `setparams=range=limited:color_primaries=bt709:color_trc=${outputTransfer}:colorspace=bt709`];
   if (settings.crf === 0) warnings.push('CRF 0 仍是重编码，使用 High 4:4:4 Predictive 配置；手机兼容性未验证，不等同于原画直出。');
   return { filters, geometry, warnings, settings };
 }
