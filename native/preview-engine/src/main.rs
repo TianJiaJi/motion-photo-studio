@@ -70,10 +70,17 @@ fn run() -> AppResult<()> {
                     time_hns,
                     seek_hns,
                     playback,
+                    boundary,
                 } => {
                     if !playback {
                         audio = None;
                     }
+                    let boundary = match boundary.as_deref() {
+                        None => None,
+                        Some("after") => Some(media::Boundary::After),
+                        Some("before") => Some(media::Boundary::Before),
+                        Some(_) => return Err("invalid locate boundary".into()),
+                    };
                     if time_hns.len() > 19 || !time_hns.bytes().all(|b| b.is_ascii_digit()) {
                         return Err("invalid native time".into());
                     }
@@ -89,6 +96,7 @@ fn run() -> AppResult<()> {
                     let frame = video.as_mut().ok_or("no open video")?.locate(
                         time_hns.parse()?,
                         seek_from,
+                        boundary,
                         &cancel,
                     )?;
                     frame_id = frame_id.checked_add(1).ok_or("frame id overflow")?;
@@ -136,6 +144,7 @@ fn run() -> AppResult<()> {
                     let frame = thumbnails.as_mut().ok_or("no thumbnail reader")?.locate(
                         time_hns.parse()?,
                         Some(seek_hns.parse()?),
+                        None,
                         &cancel,
                     )?;
                     frame_id = frame_id.checked_add(1).ok_or("frame id overflow")?;

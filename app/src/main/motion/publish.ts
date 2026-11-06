@@ -37,6 +37,7 @@ export async function publishMotionPhoto(options: {
   journal: Publications; signal: AbortSignal; io?: PublicationIO;
   onStage?: (stage: string, writtenBytes?: number, totalBytes?: number) => void | Promise<void>;
   onCommitted?: (result: SavedMotion) => void;
+  onCleanupFailure?: () => void;
 }): Promise<SavedMotion> {
   const { cover, video, journal, signal } = options; const io = options.io ?? nativeIO;
   const path = resolve(options.output);
@@ -100,6 +101,7 @@ export async function publishMotionPhoto(options: {
   if (workspace) {
     try { await journal.cleanup(workspace.id); }
     catch (error) {
+      try { options.onCleanupFailure?.(); } catch { /* Cleanup status cannot undo a committed file. */ }
       if (saved) warnings.push('成品已保存；临时工作区被占用，将在下次启动重试清理。');
       else failure = new AppFailure('TEMP_CLEANUP', `${safeFailure(failure).message} 临时工作区清理未完成，下次启动将重试。`, { cause: error });
     }

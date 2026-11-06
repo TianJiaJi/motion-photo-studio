@@ -3,13 +3,13 @@ import type { Ref } from 'react';
 import type { PreviewPixels } from '../../shared/native-preview.ts';
 import type { PreviewController } from './preview-controller.ts';
 import { scheduleCanvasDraw } from './canvas-scheduler.ts';
-export type PreviewSurfaceHandle = { enqueue(frame: PreviewPixels): void };
+export type PreviewSurfaceHandle = { enqueue(frame: PreviewPixels): void; snapshot(): string | null };
 export function PreviewSurface({ controller, enabled, ref }: { controller: PreviewController | null; enabled: boolean; ref?: Ref<PreviewSurfaceHandle> }) {
   const canvas=useRef<HTMLCanvasElement>(null);
   const latest=useRef({controller,enabled});latest.current={controller,enabled};
   const pending=useRef<{frame:PreviewPixels;owner:PreviewController}|null>(null);
   const cancelDraw=useRef<(()=>void)|null>(null);
-  useImperativeHandle(ref,()=>({enqueue(frame){
+  useImperativeHandle(ref,()=>({snapshot(){return canvas.current?.dataset.frameId ? canvas.current.toDataURL('image/png') : null;},enqueue(frame){
     const {controller:owner,enabled}=latest.current;if(!owner)return;
     if(!enabled||!owner.isCurrent(frame)){owner.drop(frame);return;}
     if(pending.current)pending.current.owner.drop(pending.current.frame);
@@ -26,7 +26,7 @@ export function PreviewSurface({ controller, enabled, ref }: { controller: Previ
       if(element.height!==frame.height)element.height=frame.height;
       context.putImageData(new ImageData(new Uint8ClampedArray(frame.pixels),frame.width,frame.height),0,0);
       element.dataset.frameId=String(frame.frameId);element.dataset.epoch=String(frame.epoch);
-      element.dataset.pts=frame.pts;element.dataset.timeUs=String(frame.timeUs);
+      element.dataset.pts=frame.pts??'';element.dataset.timeUs=String(frame.timeUs);
       next.owner.painted(frame);
     });
   }}),[]);

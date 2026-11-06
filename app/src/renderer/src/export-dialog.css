@@ -1,0 +1,99 @@
+/* Shared export workspace for one or many motion photos. */
+.export-dialog { width: min(960px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); padding: 0; border: 1px solid #43464b; border-radius: 14px; background: #1b1c1f; overflow: hidden; }
+.export-dialog[open] { display: flex; flex-direction: column; }
+.export-dialog::backdrop { background: #06080cc9; backdrop-filter: blur(5px); }
+.export-header { padding: 24px 26px 20px; display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; border-bottom: 1px solid #303236; flex-shrink: 0; }
+.export-header .eyebrow { color: var(--accent); font: 10px/1.5 "Segoe UI",sans-serif; letter-spacing: 2px; }
+.export-header h2 { font-size: 22px; font-weight: 600; letter-spacing: .5px; margin: 4px 0 7px; }
+.export-header p { font-size: 12px; color: #93979f; max-width: 65vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.close-export { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; line-height: 0; color: #a9abb1; background: transparent; border: 1px solid #393c42; border-radius: 50%; }
+.close-export svg { display: block; width: 14px; height: 14px; flex-shrink: 0; }
+.export-body { display: grid; grid-template-columns: minmax(0,1fr) 270px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.export-content { min-width: 0; padding: 18px 22px; display: flex; flex-direction: column; }
+.export-scope { order: 0; }
+.export-live-preview { order: 1; }
+.export-queue, .export-results { order: 2; }
+.export-scope { display: flex; background: #111215; border: 1px solid #303236; border-radius: 7px; padding: 3px; margin-bottom: 14px; gap: 3px; }
+.export-scope button { flex: 1; background: transparent; color: #9ea2aa; padding: 7px 12px; }
+.export-scope button[aria-pressed=true] { background: #303c3b; color: #bbebe4; box-shadow: 0 1px 4px #0004; }
+.export-list-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.export-list-heading h3 { font-size: 13px; font-weight: 500; }
+.export-list-heading > span { color: #858b94; font-size: 11px; }
+.export-queue ol { list-style: none; padding: 0; margin: 0; max-height: 164px; overflow-y: auto; }
+.export-queue li { border-bottom: 1px solid #2d3035; }
+.export-preview-select { display: flex; align-items: center; gap: 12px; padding: 9px 8px; width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 6px; }
+.export-preview-select[aria-pressed=true], .export-result-select[aria-pressed=true] { background: #253632; border-color: #496f65; }
+.export-preview-select:focus-visible { outline-offset: -3px; }
+.export-clip-number { display: grid; place-items: center; width: 36px; height: 40px; flex-shrink: 0; color: #94c9c2; background: #253330; border: 1px solid #3b514b; border-radius: 6px; font: 12px Consolas,monospace; }
+.export-clip-info { min-width: 0; display: grid; gap: 6px; }
+.export-clip-info strong, .export-clip-meta strong { font-size: 12px; font-weight: 500; }
+.export-clip-info > span { font: 10px Consolas,monospace; color: #9298a3; white-space: nowrap; }
+.export-clip-meta { display: grid; gap: 6px; text-align: right; margin-left: auto; flex-shrink: 0; }
+.export-clip-meta > span { font-size: 10px; color: #9298a3; }
+.export-settings { padding: 22px 20px; background: #202226; border-left: 1px solid #303236; }
+.export-settings > .panel { background: none; border: 0; border-radius: 0; }
+.export-settings h3 { font-size: 13px; font-weight: 500; margin-bottom: 16px; }
+.export-settings .field { font-size: 11px; margin: 14px 0; }
+.export-settings select { font-size: 12px; }
+.export-settings input[type=range] { width: 100%; }
+.export-settings .check { font-size: 11px; }
+.export-settings .hint { font-size: 10px; margin-top: 5px; }
+.export-settings .mode-switch { margin-top: 18px; margin-bottom: 12px; }
+.export-audio-controls { border-bottom: 1px solid #34373e; padding-bottom: 14px; }
+.preview-export-button { width: 100%; margin-top: 16px; border: 1px solid #3a4046; color: #bbcdcb; background: transparent; }
+.export-dialog .output-preview { border-top: 1px solid #33373d; padding-top: 18px; margin-top: 18px; }
+.export-dialog .draft-comparison { grid-template-columns: minmax(0, 1fr) 110px; gap: 12px; }
+.export-dialog .draft-comparison video, .export-dialog .draft-comparison img { height: 180px; border-radius: 5px; }
+.export-dialog .output-preview > .hint { margin-top: 10px; }
+.export-details { margin-top: 16px; border-top: 1px solid #30353c; padding-top: 12px; }
+.export-details summary { color: #9ba3ae; font-size: 11px; cursor: pointer; }
+.export-details p { font-size: 11px; color: #9299a4; line-height: 1.7; margin-top: 8px; overflow-wrap: anywhere; }
+.export-live-preview { margin: 0 0 18px; min-width: 0; }
+.export-live-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.export-live-heading h3 { font-size: 12px; font-weight: 500; }
+.export-live-heading > span { font-size: 10px; color: #929aa4; }
+.export-live-media { display: grid; grid-template-columns: minmax(0,1fr) 90px; gap: 12px; height: 208px; }
+.export-live-media .stage-host { min-height: 0; border: 1px solid #30353b; }
+.export-live-media .crop-stage { cursor: default; }
+.export-source-crop { position: absolute; pointer-events: none; }
+.export-source-crop .native-preview-surface { position: absolute; inset: 0; width: 100%; height: 100%; }
+.export-live-cover { min-width: 0; overflow: hidden; }
+.export-live-cover h4 { font-size: 11px; color: #b5bdc5; margin: 0 0 8px; font-weight: 500; }
+.export-live-cover > span { display: block; font-size: 10px; color: #929aa4; margin-top: 6px; }
+.export-cover-image { position: relative; overflow: hidden; width: 100%; max-height: 154px; border: 1px solid #343940; }
+.export-cover-image > span { font-size: 10px; color: #929aa4; }
+.export-live-transport { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.export-live-transport button { font-size: 11px; min-width: 52px; padding: 5px 9px; }
+.export-live-transport input { flex: 1; }
+.export-live-transport output { font: 10px Consolas,monospace; color: #acb5c0; flex-shrink: 0; }
+.export-result-select { display: flex; width: 100%; text-align: left; gap: 10px; padding: 8px; border: 1px solid transparent; background: transparent; }
+.export-footer { border-top: 1px solid #303236; background: #202226; padding: 16px 26px; flex-shrink: 0; }
+.export-footer-actions { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.export-footer-actions .primary-button { min-width: 190px; padding: 9px 16px; }
+.export-footer-actions .hint { font-size: 10px; }
+.export-progress { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; margin-bottom: 16px; }
+.export-progress progress { grid-column: 1 / -1; margin: 0; }
+.export-progress span { font-size: 12px; color: #bccec9; }
+.export-footer .export-failure { margin: 0 0 14px; max-height: 100px; overflow: auto; }
+.export-footer > .hint { margin-bottom: 10px; }
+.export-results h3 { color: #bcdfd5; font-size: 17px; font-weight: 500; }
+.result-counts { display: flex; gap: 22px; margin: 16px 0; font-size: 11px; color: #a5adb7; }
+.result-counts b { font-size: 17px; color: #e2e7eb; padding-left: 5px; font-weight: 500; }
+.export-result-list { list-style: none; padding: 0; margin: 0; max-height: 240px; overflow: auto; }
+.export-result-list li { border-top: 1px solid #303236; }
+.result-icon { color: #91d2ba; }
+.export-result-list li[data-status=failed] .result-icon { color: #e6a0a0; }
+.export-result-list strong { display: block; font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+.export-result-list p { color: #c1a3a3; font-size: 11px; line-height: 1.6; margin-top: 5px; overflow-wrap: anywhere; }
+@media(max-width: 900px) {
+  .export-dialog { width: calc(100vw - 32px); }
+  .export-body { grid-template-columns: minmax(0,1fr) 245px; }
+  .export-content { padding: 18px; }
+  .export-header, .export-footer { padding: 18px; }
+  .export-footer-actions > .hint { max-width: 170px; }
+}
+@media(max-height: 700px) {
+  .export-dialog { max-height: calc(100dvh - 24px); }
+  .export-header { padding-block: 14px; }
+  .export-queue ol { max-height: 180px; }
+}

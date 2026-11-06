@@ -27,6 +27,14 @@ const api: DesktopAPI = {
       },
     }),
     open: () => ipcRenderer.invoke(MEDIA_CHANNELS.open),
+    onImportSelected: (listener: () => void) => {
+      const handler = () => listener();
+      ipcRenderer.on(MEDIA_CHANNELS.importSelected, handler);
+      return () => { ipcRenderer.removeListener(MEDIA_CHANNELS.importSelected, handler); };
+    },
+    exportAll: (request: Parameters<DesktopAPI['media']['exportAll']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.exportAll, request),
+    syncClips: (request: Parameters<DesktopAPI['media']['syncClips']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.syncClips, request),
+    clearCover: (request: Parameters<DesktopAPI['media']['clearCover']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.clearCover, request),
     cancelImport: () => ipcRenderer.invoke(MEDIA_CHANNELS.cancelImport),
     thumbnails: (request: Parameters<DesktopAPI['media']['thumbnails']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.thumbnails, request),
     uploadCover: (request: Parameters<DesktopAPI['media']['uploadCover']>[0]) => ipcRenderer.invoke(MEDIA_CHANNELS.uploadCover, request),

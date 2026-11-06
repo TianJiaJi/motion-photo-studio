@@ -17,8 +17,9 @@ test('native foreground and background work cross old segment boundaries without
     await h.manager.prepareNative(asset.id,false);assert.equal(asset.info.durationUs,16000000);
     childProcess.spawn=((...args:Parameters<typeof original>)=>{starts.push(String(args[0]));return Reflect.apply(original,childProcess,args);}) as typeof original;syncBuiltinESMExports();
     const thumbnails=h.manager.thumbnails(asset.id,0,asset.info.durationUs,12,false);
-    for(const time of [500000,3000000,12000000,14000000,0])assert.equal((await h.seek(asset.id,time)).timeUs,time);
-    assert.equal((await thumbnails).length,12);assert.deepEqual(starts,[],'No editing FFmpeg, ffprobe, or replacement helper');
+    const seeks=(async()=>{for(const time of [500000,3000000,12000000,14000000,0])assert.equal((await h.seek(asset.id,time)).timeUs,time,`Seek to ${time}us`);})();
+    const [strip]=await Promise.all([thumbnails,seeks]); // Observe background rejection even if a foreground assertion fails.
+    assert.equal(strip.length,12);assert.deepEqual(starts,[],'No editing FFmpeg, ffprobe, or replacement helper');
     const [directory]=await readdir(h.store.root),files=await readdir(join(h.store.root,directory!));
     assert.equal(files.filter(name=>name.endsWith('.mp4')||name.startsWith('proxy-')).length,0);
     for(const legacy of ['preview','frame','coverFromFrame'])assert.equal(legacy in h.manager,false);

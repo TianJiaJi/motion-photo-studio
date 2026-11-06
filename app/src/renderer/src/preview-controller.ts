@@ -27,7 +27,7 @@ export class PreviewController {
   private confirmedValue: PreviewStamp | null = null;
   get confirmed() { return this.disposed ? null : this.confirmedValue; }
   private target: {timeUs:number; boundary:PreviewBoundary} = {timeUs:0,boundary:'after'};
-  constructor(assetId: string, durationUs: number, hooks: Hooks) { this.assetId=assetId; this.durationUs=durationUs; this.hooks=hooks; }
+  constructor(assetId: string, durationUs: number, hooks: Hooks, initialEpoch = 0) { this.assetId=assetId; this.durationUs=durationUs; this.hooks=hooks; this.epochValue=initialEpoch; }
   get epoch() { return this.epochValue; }
   get isDragging() { return this.dragging; }
   acceptsStatus(status:PreviewStatus) {
@@ -104,8 +104,8 @@ export class PreviewController {
   painted(frame:PreviewStamp) {
     // Only a real Canvas paint followed by a main-process acknowledgment confirms the cover/step cursor.
     this.confirmedValue=null;
-    const {assetId,epoch,frameId,sourceFrame,pts,timeUs,timeBase,width,height}=frame;
-    const stamp={assetId,epoch,frameId,sourceFrame,pts,timeUs,timeBase,width,height};
+    const {assetId,epoch,frameId,sourceFrame,pts,nativeHns,timeUs,timeBase,width,height}=frame;
+    const stamp={assetId,epoch,frameId,sourceFrame,pts,nativeHns,timeUs,timeBase,width,height};
     void this.ack(stamp,true).then(ok=>{if(ok&&!this.disposed&&assetId===this.assetId&&epoch===this.epochValue&&frameId===this.lastFrame){this.confirmedValue=stamp;this.hooks.displayed(stamp);}});
   }
   dispose(){this.disposed=true;this.pending=null;this.dragging=false;this.confirmedValue=null;}

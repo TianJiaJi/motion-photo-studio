@@ -45,7 +45,7 @@ test('MF selects actual audio tracks; delayed/short audio and tiny intervals hav
     const deadline=Date.now()+5000;
     while(status.running&&Date.now()<deadline){await delay(25);status=(await native.request<Status>({command:'audioStatus'})).value;}
     assert.equal(status.error,null);assert.equal(status.running,false);assert.equal(status.submittedFrames,28800);
-    assert.ok(BigInt(status.timeHns)>=5_800_000n&&BigInt(status.timeHns)<=6_000_000n);
+    assert.ok(BigInt(status.timeHns)>=5_800_000n&&BigInt(status.timeHns)<=6_000_000n,JSON.stringify(status));
     await native.request({command:'audioStop'});
     // One second of PCM stretched to a two-second playback interval must pad silence, not stop early.
     await native.request({command:'audioStart',path,streamIndex:stream32.streamIndex,timeUs:0,endUs:2_000_000,offsetHns:firstTrack.first.toString()});
@@ -53,7 +53,7 @@ test('MF selects actual audio tracks; delayed/short audio and tiny intervals hav
     const paddedDeadline=Date.now()+5000;
     while(status.running&&Date.now()<paddedDeadline){await delay(25);status=(await native.request<Status>({command:'audioStatus'})).value;}
     assert.equal(status.error,null);assert.equal(status.running,false);assert.equal(status.submittedFrames,64000);
-    assert.ok(BigInt(status.timeHns)>=19_800_000n&&BigInt(status.timeHns)<=20_000_000n);
+    assert.ok(BigInt(status.timeHns)>=19_800_000n&&BigInt(status.timeHns)<=20_000_000n,JSON.stringify(status));
     await native.request({command:'audioStop'});
     const tiny=(await native.request<Status>({command:'audioStart',path,streamIndex:stream32.streamIndex,timeUs:0,endUs:1,offsetHns:'0'})).value;
     assert.equal(tiny.error,null);assert.equal(tiny.running,false);assert.equal(tiny.timeHns,'10');assert.equal(tiny.submittedFrames,0);

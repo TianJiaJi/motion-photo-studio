@@ -15,7 +15,7 @@ function environment(userData: string): Record<string, string> {
 test('source-matching preset preserves final-photo color and audible AAC from HEVC60 plus PCM; failures remain visible', async () => {
   test.setTimeout(180000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-source-preset-')); const output = join(directory, 'output'); await mkdir(output);
-  const input = join(directory, 'hevc-pcm.mp4'); const surround = join(directory, 'surround.mp4'); const final = join(output, 'source-matched.jpg');
+  const input = join(directory, 'hevc-pcm.mp4'); const surround = join(directory, 'surround.mp4'); const final = join(output, 'hevc-pcm_片段01.jpg');
   let instance: Awaited<ReturnType<typeof electron.launch>> | undefined;
   const ff = (args: string[]) => runProcess(resolve('resources/bin/ffmpeg.exe'), ['-v', 'error', '-nostdin', '-n', ...args]);
   const color = 'setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709';
@@ -27,23 +27,19 @@ test('source-matching preset preserves final-photo color and audible AAC from HE
     const before = await sha256(input); const surroundBefore = await sha256(surround);
     instance = await electron.launch({ ...(process.env.MOTION_PACKAGED_EXE ? { executablePath: resolve(process.env.MOTION_PACKAGED_EXE), args: [] } : { args: [resolve('.')] }), env: environment(join(directory, 'user-data')), timeout: 60000 });
     await instance.evaluate(({ dialog }, paths) => {
-      const queue = [...paths.inputs]; dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [queue.shift()!] });
-      dialog.showSaveDialog = async () => ({ canceled: false, filePath: paths.output });
-    }, { inputs: [input, surround], output: final });
+      const queue = [...paths.inputs]; dialog.showOpenDialog = async (...args: any[]) => ({ canceled: false, filePaths: [args.at(-1).properties.includes('openDirectory') ? paths.output : queue.shift()!] });
+    }, { inputs: [input, surround], output });
     const page = await instance.firstWindow(); await instance.context().setOffline(true);
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     await expect(page.getByTestId('open-video')).toBeEnabled({ timeout: 60000 }); await page.getByTestId('open-video').click();
+    await page.getByTestId('export-motion').click();
     await page.getByLabel('原画质（跟随原片）', { exact: true }).check();
     await expect(page.getByLabel('输出帧率', { exact: true })).toHaveValue('original'); await expect(page.getByLabel('分辨率', { exact: true })).toHaveValue('original');
     await expect(page.getByLabel('画质 CRF', { exact: true })).toHaveValue('16');
-    await page.getByTestId('export-motion').click();
-    const dialog = page.getByRole('dialog', { name: '输出预览', exact: true }); await expect(dialog).toBeVisible();
-    await expect(page.getByTestId('save-motion')).toBeEnabled({ timeout: 60000 });
-    await expect(page.getByTestId('output-proof')).toContainText('原画质预设'); await expect(page.getByTestId('output-proof')).toContainText('非严格无损');
-    await expect(page.getByTestId('source-audio-parameters')).toContainText('aac · 44100 Hz · 2 声道');
-    await expect(page.getByTestId('source-audio-compatibility')).toContainText('AAC-LC');
-    await expect(page.getByTestId('output-color-compatibility')).toContainText('sRGB'); expect(await readdir(output)).toEqual([]);
-    await page.getByTestId('save-motion').click(); await expect(page.getByTestId('save-result')).toContainText('已保存 source-matched.jpg');
+    const dialog = page.getByRole('dialog', { name: '导出实况照片', exact: true }); await expect(dialog).toBeVisible();
+    await expect(page.getByTestId('native-preview')).toHaveAttribute('data-frame-id', /\d+/, { timeout: 60000 });
+    await expect(dialog.locator('details, video')).toHaveCount(0); expect(await readdir(output)).toEqual([]);
+    await page.getByTestId('confirm-export-all').click(); await expect(page.getByTestId('batch-result')).toContainText('hevc-pcm_片段01.jpg', { timeout: 60000 });
     const inspected = await validateMotion(final, true); const video = join(directory, 'extracted.mp4'); await extractRange(final, video, inspected.videoStart, inspected.videoEnd);
     const metadata = await probeMedia(video, { executable: resolve('resources/bin/ffprobe.exe') });
     const v = metadata.streams.find(stream => stream.codec_type === 'video')!; const a = metadata.streams.find(stream => stream.codec_type === 'audio')!;
@@ -67,11 +63,14 @@ test('source-matching preset preserves final-photo color and audible AAC from HE
     const rms=Math.sqrt(energy/frames),toneRms=Math.SQRT2*Math.hypot(sine,cosine)/frames;
     expect(rms).toBeGreaterThan(0.01);expect(toneRms/rms).toBeGreaterThan(0.8);
     await mkdir(resolve('../artifacts/desktop'), { recursive: true }); await page.screenshot({ path: resolve(`../artifacts/desktop/m5-source-preset-${process.env.MOTION_PACKAGED_EXE ? 'packaged' : 'development'}.png`) });
-    await page.getByRole('button', { name: '关闭输出预览', exact: true }).click(); await page.getByLabel('原画质（跟随原片）', { exact: true }).uncheck();
+    await page.getByLabel('原画质（跟随原片）', { exact: true }).uncheck();
     await expect(page.getByLabel('输出帧率', { exact: true })).toHaveValue('30'); await expect(page.getByLabel('分辨率', { exact: true })).toHaveValue('1080');
+    await page.getByRole('button', { name: '关闭导出', exact: true }).click();
     await page.getByTestId('open-video').click(); await page.getByTestId('export-motion').click(); await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole('alert')).toContainText('多声道'); await expect(page.getByTestId('save-motion')).toBeDisabled();
-    expect(await readdir(output)).toEqual(['source-matched.jpg']); await page.keyboard.press('Escape'); await expect(dialog).not.toBeVisible();
+    await page.getByTestId('confirm-export-all').click();
+    await expect(page.getByTestId('batch-result')).toContainText('多声道', { timeout: 60000 });
+    await expect(page.getByTestId('batch-result').locator('[data-status=failed]')).toHaveCount(1);
+    expect(await readdir(output)).toEqual(['hevc-pcm_片段01.jpg']); await page.keyboard.press('Escape'); await expect(dialog).not.toBeVisible();
     await page.getByRole('button', { name: '关闭素材', exact: true }).click(); await expect(page.getByTestId('editor')).toHaveCount(0);
     expect(await sha256(input)).toBe(before); expect(await sha256(surround)).toBe(surroundBefore); expect(errors).toEqual([]);
   } finally { if (instance) await instance.close(); await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }

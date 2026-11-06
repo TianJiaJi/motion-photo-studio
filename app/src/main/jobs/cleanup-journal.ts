@@ -111,6 +111,12 @@ export class CleanupJournal {
       const raced=await this.read(job);if(!raced||raced.identity!==jobIdentity)throw new CleanupFailure('invalid-journal');
     }
   }
+  // Explicit startup cache-reset policy only; never used to authorize runtime publication cleanup.
+  async discardStale(job:string):Promise<void>{
+    const path=this.path(job);if(!await this.existing())return;
+    try{const stat=await lstat(path,{bigint:true});await unlinkIdentity(path,identity(stat));}
+    catch(error){if(!missing(error))throw error;}
+  }
   async forget(job:string):Promise<void>{
     const data=await this.load(job);if(!data)return;
     await unlinkIdentity(this.path(job),data.fileIdentity);

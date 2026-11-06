@@ -2,7 +2,7 @@ use crate::AppResult;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_HEADER: usize = 16 * 1024;
 pub const MAX_PIXELS: usize = 1280 * 1280 * 4;
 
@@ -40,6 +40,9 @@ pub enum Command {
         seek_hns: Option<String>,
         #[serde(default)]
         playback: bool,
+        // "after" = first frame at/after target, "before" = last frame strictly before
+        // target. None keeps the legacy thumbnail contract (EOF falls back to the last frame).
+        boundary: Option<String>,
     },
     Thumbnail {
         #[serde(rename = "timeHns")]
@@ -124,7 +127,7 @@ pub fn read_request(input: &mut impl Read) -> AppResult<Option<Request>> {
         Some("audioStart") => &["timeUs", "path", "streamIndex", "offsetHns", "endUs"],
         Some("audioScanOpen") => &["path", "streamIndex"],
         Some("audioStreams") => &["path"],
-        Some("locate") => &["timeHns", "seekHns", "playback"],
+        Some("locate") => &["timeHns", "seekHns", "playback", "boundary"],
         Some("thumbnail") => &["timeHns", "seekHns"],
         Some("quality") => &["maximumEdge"],
         Some("scanFrames" | "prefetch" | "audioScan") => &["count"],
@@ -185,16 +188,16 @@ mod tests {
     #[test]
     fn accepts_versioned_commands_and_rejects_unknown_input() {
         for body in [
-            r#"{"version":1,"id":1,"generation":1,"command":"hello"}"#,
-            r#"{"version":1,"id":2,"generation":1,"command":"seek","timeUs":123}"#,
+            r#"{"version":2,"id":1,"generation":1,"command":"hello"}"#,
+            r#"{"version":2,"id":2,"generation":1,"command":"seek","timeUs":123}"#,
         ] {
             let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
             bytes.extend_from_slice(body.as_bytes());
             assert!(matches!(read_request(&mut &bytes[..]), Ok(Some(_))));
         }
         for body in [
-            r#"{"version":2,"id":1,"generation":1,"command":"hello"}"#,
-            r#"{"version":1,"id":1,"generation":1,"command":"exec","shell":"cmd"}"#,
+            r#"{"version":1,"id":1,"generation":1,"command":"hello"}"#,
+            r#"{"version":2,"id":1,"generation":1,"command":"exec","shell":"cmd"}"#,
         ] {
             let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
             bytes.extend_from_slice(body.as_bytes());

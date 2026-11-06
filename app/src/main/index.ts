@@ -4,6 +4,7 @@ import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHANNELS } from '../shared/contracts.ts';
 import { MEDIA_CHANNELS } from '../shared/media-ipc.ts';
+import { clipReference } from './media/clip-requests.ts';
 import { parseMediaRequest } from './media/requests.ts';
 import { NATIVE_CHANNELS } from '../shared/native-preview.ts';
 import { parseNativePrepare, parseNativeControl, parseNativeAck, parseNativeCapture } from './media/native-requests.ts';
@@ -66,9 +67,9 @@ function trusted(event: Electron.IpcMainInvokeEvent) {
     || !isTrustedRenderer(event.senderFrame.url, developmentUrl)) throw new AppFailure('UNTRUSTED_SENDER', '拒绝来自非应用主页面的请求。');
 }
 
-function mediaReady(): MediaSession {
+function mediaReady(allowPicking = false): MediaSession {
   if (!editor || engineStatus.state !== 'ready' || shuttingDown) throw new AppFailure('ENGINE_NOT_READY', '离线媒体引擎尚未就绪。');
-  if (pickingFile || ['running', 'cancelling'].includes(jobs?.snapshot()?.state ?? '')) throw new AppFailure('JOB_BUSY', '请先完成文件选择或离线自检。');
+  if (pickingFile && !allowPicking || ['running', 'cancelling'].includes(jobs?.snapshot()?.state ?? '')) throw new AppFailure('JOB_BUSY', '请先完成文件选择或离线自检。');
   return editor;
 }
 async function chooseFile(cover: boolean): Promise<string | null> {
@@ -79,6 +80,16 @@ async function chooseFile(cover: boolean): Promise<string | null> {
       filters: [{ name: cover ? '封面图片' : '视频文件', extensions: cover ? ['jpg', 'jpeg', 'png']
         : ['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'mts', 'm2ts', 'mpg', 'mpeg', 'wmv'] }] });
     return result.canceled ? null : result.filePaths[0] ?? null;
+  } finally { pickingFile = false; }
+}
+
+async function chooseDirectory(): Promise<string | null> {
+  if (!window || pickingFile) throw new AppFailure('JOB_BUSY', '请先完成已有文件选择。');
+  pickingFile = true;
+  try {
+    const chosen = await dialog.showOpenDialog(window, { title: '选择导出文件夹',
+      properties: ['openDirectory', 'createDirectory', 'dontAddToRecent'] });
+    return chosen.canceled ? null : chosen.filePaths[0] ?? null;
   } finally { pickingFile = false; }
 }
 
@@ -106,7 +117,11 @@ else {
     void Promise.allSettled([jobs?.shutdown(), editor?.shutdown(), previewCheck])
       .then(results => {
         for (const result of results) if (result.status === 'rejected') console.error('Task cleanup failed:', publicError(result.reason));
-        return mediaResources.dispose();
+        return mediaResources.dispose().then(async () => {
+          // Never reset workspaces if any process/reader failed its release barrier.
+          if (results.every(result => result.status === 'fulfilled'))
+            await Promise.allSettled(cleanupStores.map(store => store.initialize({ discardStale: true })));
+        });
       })
       .catch(error => console.error('Resource drain failed:', publicError(error)))
       .finally(() => { safeToQuit = true; app.quit(); });
@@ -144,9 +159,9 @@ else {
     const sessionTemp = new TempFiles(join(app.getPath('userData'), 'media-sessions'));
     const temp = new TempFiles(join(app.getPath('userData'), 'jobs'));
     cleanupStores.push(temp, sessionTemp);
-    try { await temp.initialize(); }
+    try { await temp.initialize({ discardStale: true }); }
     catch { warnings = ['任务目录不可写，媒体自检将无法完成。']; }
-    try { await sessionTemp.initialize(); }
+    try { await sessionTemp.initialize({ discardStale: true }); }
     catch { warnings.push('媒体缓存目录不可写，请检查应用数据目录权限。'); }
     try {
       const candidate = new Publications(join(app.getPath('userData'), 'publications'));
@@ -166,8 +181,12 @@ else {
       jobs.cancel(id); return null;
     }));
     ipcMain.handle(MEDIA_CHANNELS.open, (event, ...args: unknown[]) => reply(async () => {
-      trusted(event); assertNoArgs(args); mediaReady();
-      const path = await chooseFile(false); return path ? mediaReady().open(path) : null;
+      trusted(event); assertNoArgs(args); mediaReady().assertImportAllowed();
+      const path = await chooseFile(false);
+      if (!path) return null;
+      // Reading starts only after the native picker returns a file. No paths cross this event.
+      if (!event.sender.isDestroyed()) event.sender.send(MEDIA_CHANNELS.importSelected);
+      return mediaReady().open(path);
     }));
     ipcMain.handle(MEDIA_CHANNELS.cancelImport, (event, ...args: unknown[]) => reply(async () => {
       trusted(event); assertNoArgs(args); await mediaReady().cancelImport(); return null;
@@ -175,7 +194,7 @@ else {
     ipcMain.handle(NATIVE_CHANNELS.prepare, (event, ...args: unknown[]) => reply(() => {
       trusted(event); const p = parseNativePrepare(args);
       if (previewEngineStatus.state !== 'ready') throw new AppFailure('ENGINE_NOT_READY', '原生预览引擎未通过校验，请检查帮助中的状态。');
-      return mediaReady().prepareNative(p.assetId, p.hdrConsent);
+      return mediaReady().prepareNative(p.assetId, p.hdrConsent, p.audioTrack, p.forceStrict);
     }, error => console.error('Native preparation failed:', error)));
     ipcMain.handle(NATIVE_CHANNELS.control, (event, ...args: unknown[]) => reply(async () => {
       trusted(event); const p = parseNativeControl(args);
@@ -188,7 +207,16 @@ else {
       editor.nativeAcknowledge(p); return null;
     }));
     ipcMain.handle(NATIVE_CHANNELS.capture, (event, ...args: unknown[]) => reply(() => {
-      trusted(event); const p = parseNativeCapture(args); return mediaReady().nativeCover(p.assetId, p.frameId);
+      trusted(event); const p = parseNativeCapture(args); return mediaReady().nativeCover(p.assetId, p.frameId, p.epoch, clipReference(p));
+    }));
+    ipcMain.handle(MEDIA_CHANNELS.exportAll, (event, ...args: unknown[]) => reply(() => {
+      trusted(event); const p = parseMediaRequest('exportAll', args); return mediaReady().exportAll(p.assetId, p.snapshot, chooseDirectory);
+    }));
+    ipcMain.handle(MEDIA_CHANNELS.syncClips, (event, ...args: unknown[]) => reply(async () => {
+      trusted(event); const p = parseMediaRequest('syncClips', args); await mediaReady().syncClips(p.assetId, p.clips); return null;
+    }));
+    ipcMain.handle(MEDIA_CHANNELS.clearCover, (event, ...args: unknown[]) => reply(async () => {
+      trusted(event); const p = parseMediaRequest('clearCover', args); await mediaReady().clearCover(p.assetId, clipReference(p)); return null;
     }));
     ipcMain.handle(MEDIA_CHANNELS.thumbnails, (event, ...args: unknown[]) => reply(() => {
       trusted(event); const p = parseMediaRequest('thumbnails', args);
@@ -196,21 +224,21 @@ else {
     }));
     ipcMain.handle(MEDIA_CHANNELS.uploadCover, (event, ...args: unknown[]) => reply(async () => {
       trusted(event); const p = parseMediaRequest('uploadCover', args); mediaReady().assertActive(p.assetId);
-      const path = await chooseFile(true); return path ? mediaReady().uploadCover(p.assetId, path) : null;
+      const path = await chooseFile(true); return path ? mediaReady().uploadCover(p.assetId, path, clipReference(p)) : null;
     }));
     ipcMain.handle(MEDIA_CHANNELS.analyze, (event, ...args: unknown[]) => reply(() => {
-      trusted(event); const p = parseMediaRequest('analyze', args); return mediaReady().analyze(p.assetId, p.options);
+      trusted(event); const p = parseMediaRequest('analyze', args); return mediaReady().analyze(p.assetId, p.options, clipReference(p));
     }, error => console.error('Local export analysis failed:', error)));
     ipcMain.handle(MEDIA_CHANNELS.renderDraft, (event, ...args: unknown[]) => reply(() => {
-      trusted(event); const p = parseMediaRequest('renderDraft', args); return mediaReady().renderDraft(p.assetId, p.analysisId, p.image);
+      trusted(event); const p = parseMediaRequest('renderDraft', args); return mediaReady().renderDraft(p.assetId, p.analysisId, p.image, clipReference(p));
     }, error => console.error('Local draft rendering failed:', error)));
     ipcMain.handle(MEDIA_CHANNELS.saveDraft, (event, ...args: unknown[]) => reply(async () => {
-      trusted(event); const p = parseMediaRequest('saveDraft', args); mediaReady().assertDraft(p.assetId, p.draftId);
+      trusted(event); const p = parseMediaRequest('saveDraft', args); mediaReady().assertDraft(p.assetId, p.draftId, clipReference(p));
       const path = await chooseSaveFile();
-      return path ? mediaReady().saveDraft(p.assetId, p.draftId, p.saveId, path) : null;
+      return path ? mediaReady().saveDraft(p.assetId, p.draftId, p.saveId, path, clipReference(p)) : null;
     }, error => console.error('Local final publication failed:', error)));
     ipcMain.handle(MEDIA_CHANNELS.cancel, (event, ...args: unknown[]) => reply(async () => {
-      trusted(event); const p = parseMediaRequest('cancel', args); return mediaReady().cancel(p.assetId, p.saveId);
+      trusted(event); const p = parseMediaRequest('cancel', args); return mediaReady(true).cancel(p.assetId, p.saveId, p.batchId);
     }));
     ipcMain.handle(MEDIA_CHANNELS.close, (event, ...args: unknown[]) => reply(async () => {
       trusted(event); const p = parseMediaRequest('close', args); await mediaReady().close(p.assetId); return null;

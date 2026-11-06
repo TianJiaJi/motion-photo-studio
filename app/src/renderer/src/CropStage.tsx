@@ -3,8 +3,8 @@ import type { ReactNode, PointerEvent } from 'react';
 import type { CropRect } from '../../shared/editor.ts';
 
 type Point = { x: number; y: number };
-export function CropStage({ width, height, crop, locked, disabled = false, showOverlay = true, onChange, onEdit, children }: {
-  width: number; height: number; crop: CropRect; locked: boolean; disabled?: boolean; showOverlay?: boolean;
+export function CropStage({ width, height, crop, locked, disabled = false, showOverlay = true, testId = 'crop-stage', onChange, onEdit, children }: {
+  width: number; height: number; crop: CropRect; locked: boolean; disabled?: boolean; showOverlay?: boolean; testId?: string;
   onChange(value: CropRect): void; onEdit(): void; children: ReactNode;
 }) {
   const host = useRef<HTMLDivElement>(null); const stage = useRef<HTMLDivElement>(null);
@@ -14,7 +14,9 @@ export function CropStage({ width, height, crop, locked, disabled = false, showO
     if (!host.current) return;
     const observer = new ResizeObserver(entries => {
       const { width, height } = entries[0]!.contentRect;
-      setAvailable({ width: Math.max(1, width), height: Math.max(1, height) });
+      // A closed dialog measures 0×0. Keep the last usable size rather than
+      // collapsing the stage to a one-pixel, rounding-distorted frame on reopen.
+      if (width > 0 && height > 0) setAvailable({ width, height });
     });
     observer.observe(host.current); return () => observer.disconnect();
   }, []);
@@ -24,6 +26,7 @@ export function CropStage({ width, height, crop, locked, disabled = false, showO
     return { x: Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)), y: Math.max(0, Math.min(1, (event.clientY - box.top) / box.height)) };
   };
   function start(event: PointerEvent, kind: 'draw' | 'move', anchor?: Point) {
+    stage.current?.focus({ preventScroll: true });
     if (disabled || event.button !== 0) return;
     event.preventDefault(); event.stopPropagation(); onEdit();
     stage.current!.setPointerCapture(event.pointerId);
@@ -45,7 +48,7 @@ export function CropStage({ width, height, crop, locked, disabled = false, showO
     onChange({ x: dx < 0 ? d.anchor.x - w : d.anchor.x, y: dy < 0 ? d.anchor.y - h : d.anchor.y, width: w, height: h });
   }
   return <div ref={host} className="stage-host">
-    <div ref={stage} data-testid="crop-stage" className="crop-stage" style={{ width: width * scale, height: height * scale }}
+    <div ref={stage} data-testid={testId} className="crop-stage" tabIndex={0} style={{ width: width * scale, height: height * scale }}
       onPointerDown={e => start(e, 'draw')} onPointerMove={move}
       onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
       {children}

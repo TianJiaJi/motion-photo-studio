@@ -1,13 +1,14 @@
 import {AppFailure,publicError} from '../errors.ts';
 import type {PreviewAck,PreviewControl,PreviewPixels,PreviewReady,PreviewStatus} from '../../shared/native-preview.ts';
-import type {PreparedNativeMedia} from './native-import.ts';
+import type {PreparedMedia} from './native-import.ts';
+import type {FrameIdentity,ProvidedFrame} from './frame-provider.ts';
 import {assertSource,type SourceFile} from './source.ts';
-import type {IndexedFrame} from './frame-index.ts';
 import {nativeInteger} from './native-preview.ts';
+// Fast on-demand preview: frames and exact identity come from the mode-specific frame provider;
+// playback, drag, step and cover capture keep the epoch/ACK/latest-wins transport contract.
 type Ticket={request:PreviewControl;resolve():void;reject(error:unknown):void};
-type Image=Omit<PreviewPixels,'assetId'|'epoch'|'frameId'>;
 type Presentation={frame:PreviewPixels;done:Promise<boolean>;settle(painted:boolean):void;timer?:NodeJS.Timeout};
-type Playback={epoch:number;startUs:number;endUs:number;started:number;audio:boolean;lastDecoded:number};
+type Playback={epoch:number;startUs:number;endUs:number;started:number;audio:boolean;lastKey:string};
 type AudioStatus={running:boolean;timeHns:string;error:string|null};
 const cancelled=()=>new AppFailure('CANCELLED','预览操作已被替代。');
 
@@ -15,6 +16,7 @@ const cancelled=()=>new AppFailure('CANCELLED','预览操作已被替代。');
 // renderer cannot grow the Electron IPC queue, even across repeated interaction epochs.
 export class NativeTimeline {
   private epoch=0;
+  private localWork=new AbortController();
   private sequence=0;
   private mode:'drag'|'other'='other';
   private edge=0;
@@ -34,17 +36,18 @@ export class NativeTimeline {
   private closing?:Promise<void>;
   private counters={generated:0,sent:0,replaced:0,late:0};
   readonly assetId:string;
-  readonly media:PreparedNativeMedia;
+  readonly media:PreparedMedia;
   private source:SourceFile;
   private hooks:{frame(frame:PreviewPixels):void;status(status:PreviewStatus):void};
-  constructor(assetId:string,source:SourceFile,media:PreparedNativeMedia,hooks:{frame(frame:PreviewPixels):void;status(status:PreviewStatus):void}) {
+  constructor(assetId:string,source:SourceFile,media:PreparedMedia,hooks:{frame(frame:PreviewPixels):void;status(status:PreviewStatus):void}) {
     this.assetId=assetId;this.source=source;this.media=media;this.hooks=hooks;
     void media.native.terminated.then(()=>{if(!this.closed)this.fail(new AppFailure('NATIVE_EXIT','原生预览进程意外退出，请重新导入素材。'));});
   }
+  get usable():boolean {return !this.closed&&!this.failure&&this.media.native.alive;}
   get ready():PreviewReady {
     this.check();
-    const {index,nativeInfo,compatibility,warnings}=this.media;
-    return {assetId:this.assetId,frameCount:index.count,compatibility,warnings:[...warnings],sourceWidth:index.info.displayWidth,sourceHeight:index.info.displayHeight,
+    const {frames,nativeInfo,compatibility,warnings}=this.media;
+    return {assetId:this.assetId,frameCount:frames.frameCount,mode:frames.mode,compatibility,warnings:[...warnings],sourceWidth:frames.info.displayWidth,sourceHeight:frames.info.displayHeight,
       previewWidth:nativeInfo.width,previewHeight:nativeInfo.height,hardwareDecodeVerified:nativeInfo.hardwareDecodeVerified};
   }
   get stats(){return {...this.counters,pendingControls:Number(Boolean(this.queued)),activeControl:Boolean(this.work),inFlight:Number(Boolean(this.flight)),pendingImages:Number(Boolean(this.waiting)),
@@ -57,7 +60,7 @@ export class NativeTimeline {
   private stopClock(){if(this.timer)clearTimeout(this.timer);this.timer=undefined;this.playing=undefined;}
   private settle(presentation:Presentation|undefined,painted=false){if(presentation?.timer)clearTimeout(presentation.timer);if(presentation)presentation.settle(painted);}
   private fail(error:unknown){
-    if(this.closed||this.failure)return;this.failure=error;this.stopClock();this.queued?.reject(error);this.queued=undefined;
+    if(this.closed||this.failure)return;this.failure=error;this.localWork.abort();this.stopClock();this.queued?.reject(error);this.queued=undefined;
     this.settle(this.flight);this.settle(this.waiting);this.waiting=undefined;this.status('failed',error);
     // Fatal renderer/protocol failures must not leave WASAPI playing unattended.
     void this.media.native.shutdown().catch(()=>{/* dispose must confirm exit before any owned-file deletion. */});
@@ -84,6 +87,7 @@ export class NativeTimeline {
       this.check();if(request.assetId!==this.assetId)throw cancelled();
       if(request.epoch<this.epoch||request.epoch===this.epoch&&!(this.mode==='drag'&&request.action==='seek'&&!request.final))throw cancelled();
       if(request.epoch>this.epoch){
+        this.localWork.abort();this.localWork=new AbortController();
         this.epoch=request.epoch;this.media.native.advanceEpoch();this.stopClock();
         // Keep the already-sent slot until its ACK, otherwise a hidden renderer could accumulate frames.
         this.flight?.settle(false);this.settle(this.waiting);this.waiting=undefined;
@@ -108,17 +112,13 @@ export class NativeTimeline {
     if(this.edge!==edge){this.edge=0;await this.media.native.request({command:'quality',maximumEdge:edge});this.edge=edge;}
     this.check(epoch);
   }
-  private async image(row:IndexedFrame,epoch:number,playback=false):Promise<Image>{
-    await assertSource(this.source);this.check(epoch);
-    const result=await this.media.index.locate(this.media.native,row.index,undefined,playback);this.check(epoch);
-    const actual=await this.media.index.fromNative(result.value.timestampHns);this.check(epoch);
-    if(actual.index!==row.index||!result.pixels.length)throw new AppFailure('FRAME_INDEX','原生预览返回了错误的源帧。');
-    return {sourceFrame:row.index,pts:row.pts,timeUs:row.timeUs,timeBase:this.media.index.info.timeBase,width:result.value.width,height:result.value.height,pixels:result.pixels};
-  }
-  private publish(image:Image,epoch:number):Presentation {
+  private publish(image:ProvidedFrame|PreviewPixels,epoch:number):Presentation {
     this.check(epoch);if(this.sequence>=Number.MAX_SAFE_INTEGER)throw new AppFailure('NATIVE_PROTOCOL','预览帧编号已耗尽。');
     let settle!:(value:boolean)=>void;const done=new Promise<boolean>(resolve=>{settle=resolve;});
-    const frame:PreviewPixels={...image,assetId:this.assetId,epoch,frameId:++this.sequence};
+    const identity:FrameIdentity|null='identity' in image?image.identity:image.pts===null?null:{pts:image.pts,sourceFrame:image.sourceFrame};
+    const frame:PreviewPixels={assetId:this.assetId,epoch,frameId:++this.sequence,
+      sourceFrame:identity?.sourceFrame??null,pts:identity?.pts??null,nativeHns:image.nativeHns,
+      timeUs:image.timeUs,timeBase:'timeBase' in image?image.timeBase:this.media.frames.info.timeBase,width:image.width,height:image.height,pixels:image.pixels};
     const presentation:Presentation={frame,done,settle};this.counters.generated++;
     if(this.waiting){this.settle(this.waiting);this.counters.replaced++;}this.waiting=presentation;this.flush();return presentation;
   }
@@ -144,37 +144,38 @@ export class NativeTimeline {
     if(accepted)this.displayed=current.frame;this.settle(current,accepted);this.flush();
     if(ack.painted&&!accepted)throw cancelled();
   }
-  capture(frameId:number):PreviewPixels {
-    this.check();if(!this.displayed||this.displayed.frameId!==frameId)throw new AppFailure('FRAME_BOUNDARY','封面必须来自已确认显示的当前帧。');
+  capture(frameId:number,expectedEpoch?:number):PreviewPixels {
+    this.check();if(!this.displayed||this.displayed.frameId!==frameId||expectedEpoch!==undefined&&(this.displayed.epoch!==expectedEpoch||this.epoch!==expectedEpoch))throw new AppFailure('FRAME_BOUNDARY','封面必须来自已确认显示的当前帧。');
     return this.displayed;
   }
   private async perform(request:PreviewControl){
-    const {index,native}=this.media;const epoch=request.epoch;await assertSource(this.source);this.check(epoch);
+    const {frames,native}=this.media;const epoch=request.epoch;await assertSource(this.source);this.check(epoch);
     if(request.action==='pause'){
       // Republish the last confirmed image in the new epoch, including an ACK/pause race.
       const last=this.displayed??this.flight?.frame;if(last)this.publish(last,epoch);this.status('paused');return;
     }
     if(request.action==='seek'){
-      await this.quality(request.maximumEdge,epoch);const row=await index.at(request.timeUs,request.boundary);
-      this.publish(await this.image(row,epoch),epoch);this.status('paused');return;
+      await this.quality(request.maximumEdge,epoch);this.check(epoch);
+      this.publish(await frames.frameAt(native,request.timeUs,request.boundary),epoch);this.status('paused');return;
     }
     if(request.action==='step'){
-      const current=this.capture(request.frameId);const number=current.sourceFrame+request.direction;
-      if(number<0||number>=index.count)throw new AppFailure('FRAME_BOUNDARY','已到素材首尾帧。');
-      await this.quality(960,epoch);this.publish(await this.image(await index.get(number),epoch),epoch);this.status('paused');return;
+      const current=this.capture(request.frameId);
+      await this.quality(960,epoch);this.check(epoch);
+      const identity:FrameIdentity|null=current.pts===null?null:{pts:current.pts,sourceFrame:current.sourceFrame};
+      this.publish(await frames.step(native,{timeUs:current.timeUs,identity,nativeHns:current.nativeHns},request.direction,this.localWork.signal),epoch);this.status('paused');return;
     }
-    if(request.startUs<0||request.endUs>index.info.durationUs||request.endUs<=request.startUs)throw new AppFailure('INVALID_REQUEST','播放区间超出素材范围。');
+    if(request.startUs<0||request.endUs>frames.info.durationUs||request.endUs<=request.startUs)throw new AppFailure('INVALID_REQUEST','播放区间超出素材范围。');
     const track=request.audioTrack===null?undefined:this.media.audio.find(track=>track.sourceIndex===request.audioTrack);
     if(request.audioTrack!==null&&!track)throw new AppFailure('INVALID_REQUEST','所选音轨没有完成导入准备。');
-    const first=await index.at(request.startUs,'after');if(first.timeUs>=request.endUs)throw new AppFailure('FRAME_BOUNDARY','播放区间内没有源帧。');
+    const first=await frames.frameAt(native,request.startUs,'after');if(first.timeUs>=request.endUs)throw new AppFailure('FRAME_BOUNDARY','播放区间内没有源帧。');
     await this.quality(960,epoch);
-    const presentation=this.publish(await this.image(first,epoch),epoch);
+    const presentation=this.publish(first,epoch);
     if(!await presentation.done)throw cancelled();this.check(epoch);
     const audio=Boolean(track&&track.kind!=='silent');
     if(audio&&track){
       await native.request({command:'audioStart',path:track.path,streamIndex:track.streamIndex,offsetHns:track.offsetHns,timeUs:first.timeUs,endUs:request.endUs});this.check(epoch);
     }
-    const playback:Playback={epoch,startUs:first.timeUs,endUs:request.endUs,started:performance.now(),audio,lastDecoded:first.index};
+    const playback:Playback={epoch,startUs:first.timeUs,endUs:request.endUs,started:performance.now(),audio,lastKey:first.key};
     this.playing=playback;this.status('playing');this.schedule(playback,0);
   }
   private schedule(playback:Playback,delay:number){
@@ -191,7 +192,8 @@ export class NativeTimeline {
     if(!playback.audio)return Math.min(playback.endUs,playback.startUs+Math.floor((performance.now()-playback.started)*1000));
     const {value:audio}=await this.media.native.request<AudioStatus>({command:'audioStatus'});this.check(playback.epoch);
     if(!audio||typeof audio.running!=='boolean'||audio.error!==null&&typeof audio.error!=='string')throw new AppFailure('NATIVE_PROTOCOL','原生音频时钟响应不合法。');
-    if(audio.error)throw new AppFailure('NATIVE_MEDIA','音频设备播放失败，已暂停预览。');
+    if(audio.error)throw new AppFailure('NATIVE_MEDIA',audio.error.includes('timeline discontinuity')
+      ?'音轨在当前区间发生时间跳变，已暂停；请使用精确兼容准备。':'音频设备播放失败，已暂停预览。');
     const time=Number(nativeInteger(audio.timeHns)/10n);
     if(!Number.isSafeInteger(time)||time<playback.startUs||time>playback.endUs)throw new AppFailure('NATIVE_PROTOCOL','原生音频时钟超出源区间。');
     return audio.running?time:playback.endUs;
@@ -200,13 +202,12 @@ export class NativeTimeline {
     if(this.playing!==playback||this.closed)return;
     if(this.flight&&this.waiting)return;
     const now=await this.clock(playback);if(this.playing!==playback)return;
-    const row=await this.media.index.at(Math.min(playback.endUs,now+1),'before');this.check(playback.epoch);
-    if(row.index!==playback.lastDecoded){
-      const image=await this.image(row,playback.epoch,true);if(this.playing!==playback)return;
+    const frame=await this.media.frames.frameAt(this.media.native,Math.min(playback.endUs,now+1),'before',true);this.check(playback.epoch);
+    if(frame.key!==playback.lastKey){
+      if(this.playing!==playback)return;
       const fresh=await this.clock(playback);if(this.playing!==playback)return;
-      const duration=Number(BigInt(row.durationPts)*BigInt(this.media.index.info.timeBase.numerator)*1_000_000n/BigInt(this.media.index.info.timeBase.denominator));
-      if(fresh<playback.endUs&&fresh-row.timeUs>Math.max(50_000,duration*2)){this.counters.late++;return;}
-      playback.lastDecoded=row.index;this.publish(image,playback.epoch);
+      if(fresh<playback.endUs&&fresh-frame.timeUs>Math.max(50_000,frame.durationUs*2)){this.counters.late++;return;}
+      playback.lastKey=frame.key;this.publish(frame,playback.epoch);
     }
     if(now>=playback.endUs){
       this.stopClock();await this.media.native.request({command:'audioStop'});this.check(playback.epoch);this.status('paused');
@@ -218,13 +219,19 @@ export class NativeTimeline {
       if(!this.closed&&!(error instanceof AppFailure&&['CANCELLED','NATIVE_BUSY'].includes(error.code)))this.status('paused',error);
     });this.prefetchWork=work;void work.finally(()=>{if(this.prefetchWork===work)this.prefetchWork=undefined;});
   }
+  async suspend():Promise<void>{
+    this.stopClock();this.localWork.abort();this.queued?.reject(cancelled());this.queued=undefined;
+    this.flight?.settle(false);this.settle(this.waiting);this.waiting=undefined;
+    await this.interrupt();await Promise.allSettled([this.work,this.tickWork,this.prefetchWork]);
+    this.stopClock();await this.interrupt();
+  }
   dispose():Promise<void>{
     if(this.closing)return this.closing;
-    this.closed=true;this.stopClock();this.queued?.reject(cancelled());this.queued=undefined;
+    this.closed=true;this.localWork.abort();this.stopClock();this.queued?.reject(cancelled());this.queued=undefined;
     this.settle(this.flight);this.settle(this.waiting);this.flight=undefined;this.waiting=undefined;this.displayed=undefined;
     this.closing=(async()=>{
       try{await this.media.native.shutdown();}
-      finally{await Promise.allSettled([this.work,this.tickWork,this.interruptWork,this.prefetchWork]);await this.media.index.close();}
+      finally{await Promise.allSettled([this.work,this.tickWork,this.interruptWork,this.prefetchWork]);await this.media.frames.close();}
     })();return this.closing;
   }
 }

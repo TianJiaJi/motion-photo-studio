@@ -1,17 +1,23 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { Reply } from '../../shared/contracts.ts';
 import type { VideoAsset, Thumbnail, CoverAsset } from '../../shared/media.ts';
 import type { PreviewReady, PreviewStamp, PreviewBoundary } from '../../shared/native-preview.ts';
 import { PreviewController } from './preview-controller.ts';
 import { PreviewSurface, type PreviewSurfaceHandle } from './PreviewSurface.tsx';
-import { cropToPixels, formatTime, parseTime, validateClip } from '../../shared/editor.ts';
-import type { CropRect, ClipSelection, ExportSettings } from '../../shared/editor.ts';
+import { cropToPixels, formatTime, parseTime, validateClip, createClip, clipSelectionAt, MAX_CLIPS } from '../../shared/editor.ts';
+import type { CropRect, ClipSelection, ExportSettings, ClipModel } from '../../shared/editor.ts';
+import type { ClipReference } from '../../shared/media-ipc.ts';
+import type { ProcessingState } from '../../shared/processing.ts';
 import { CropStage } from './CropStage.tsx';
+import { ImportWelcome } from './ImportWelcome.tsx';
 import { Timeline, type TimelineInteraction } from './Timeline.tsx';
 import { createProcessingState, effectiveProcessing, previewCrop, setProcessingMode, updateProcessingEdits, SOURCE_MATCH_EDITS } from '../../shared/processing.ts';
-import type { ExportInspection, ExportDraft, ExportOptions, SavedMotion } from '../../shared/export.ts';
+import type { BatchSnapshot, BatchResult } from '../../shared/export.ts';
 import { initialAudioTrack, audioSelection } from '../../shared/export.ts';
 import './editor.css';
+import './workspace.css';
+import './export-dialog.css';
 
 function unwrap<T>(result: Reply<T>): T {
   if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
@@ -39,6 +45,8 @@ function TimeField({ label, value, disabled, change, error }: { label: string; v
     }} /></label>;
 }
 const fullCrop: CropRect = { x: 0, y: 0, width: 1, height: 1 };
+type EditorClip = ClipModel & { cover: CoverAsset | null };
+const emptyClip: EditorClip = { ...createClip('empty', { startUs: 0, endUs: 1 }, 1), cover: null };
 export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { ready: boolean; preparing: boolean; diagnosticsBusy: boolean; savingReady: boolean }) {
   const [asset, setAsset] = useState<VideoAsset | null>(null);
   const assetRef = useRef<VideoAsset | null>(null);
@@ -46,37 +54,89 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
   const [nativePreparing, setNativePreparing] = useState(false);
   const [nativeProgress, setNativeProgress] = useState('准备原生预览…');
   const [prepareAttempt, setPrepareAttempt] = useState(0);
+  const [forceStrict, setForceStrict] = useState(false);
+  const previewEpoch = useRef(0);
   const [controller, setController] = useState<PreviewController | null>(null);
   const controllerRef = useRef<PreviewController | null>(null);
   const surface = useRef<PreviewSurfaceHandle>(null);
   const [frame, setFrame] = useState<PreviewStamp | null>(null);
   const targetKind = useRef<'start' | 'end' | 'playhead' | 'step' | 'play'>('playhead');
-  const [cover, setCover] = useState<CoverAsset | null>(null);
+  const [clips, setClips] = useState<EditorClip[]>([]);
+  const clipsRef = useRef<EditorClip[]>([]);
+  const [activeClipId, setActiveClipId] = useState('');
+  const activeClipRef = useRef('');
+  const nextClipNumber = useRef(2);
+  const clipSync = useRef<Promise<void>>(Promise.resolve());
+  const activeClip = clips.find(item => item.id === activeClipId) ?? emptyClip;
+  const { cover, selection: clip, cropLocked: locked, coverFit, background } = activeClip;
+  function commitClips(next: EditorClip[], sync = true) {
+    clipsRef.current = next; setClips(next);
+    const source = assetRef.current;
+    if (sync && source) {
+      const promise = window.motion.media.syncClips({ assetId: source.id, clips: next.map(({ cover: _cover, ...model }) => model) }).then(unwrap).then(() => {});
+      clipSync.current = promise;
+      void promise.catch(report);
+    }
+  }
+  function updateClip(change: Partial<Omit<EditorClip, 'id' | 'number' | 'revision'>>, id = activeClipRef.current) {
+    commitClips(clipsRef.current.map(item => item.id === id ? { ...item, ...change, revision: item.revision + 1 } : item));
+  }
+  function changeShared(action: () => void) {
+    commitClips(clipsRef.current.map(item => ({ ...item, revision: item.revision + 1 })));
+    action();
+  }
+  async function syncedClip(): Promise<ClipReference> {
+    const chosen = clipsRef.current.find(item => item.id === activeClipRef.current);
+    if (!chosen) throw new Error('没有活动片段。');
+    const ref = { clipId: chosen.id, revision: chosen.revision };
+    await clipSync.current;
+    if (clipsRef.current.find(item => item.id === ref.clipId)?.revision !== ref.revision)
+      throw Object.assign(new Error('片段已变化。'), { code: 'CANCELLED' });
+    return ref;
+  }
+  function acceptCover(ref: ClipReference, value: CoverAsset | null) {
+    if (clipsRef.current.find(item => item.id === ref.clipId)?.revision === ref.revision) updateClip({ cover: value }, ref.clipId);
+  }
+  const setLocked = (cropLocked: boolean) => updateClip({ cropLocked });
+  const setCoverFit = (fit: 'cover' | 'contain') => updateClip({ coverFit: fit });
+  const setBackground = (value: string) => updateClip({ background: value });
   const [thumbs, setThumbs] = useState<Thumbnail[]>([]);
   const [thumbBusy, setThumbBusy] = useState(false);
   const [position, setPosition] = useState(0);
-  const [clip, setClip] = useState<ClipSelection>({ startUs: 0, endUs: 1 });
-  const [processing, setProcessing] = useState(() => createProcessingState());
+  const [sharedProcessing, setSharedProcessing] = useState(() => createProcessingState());
+  const processing: ProcessingState = { ...sharedProcessing, saved: { ...sharedProcessing.saved, crop: activeClip.crop } };
+  const setProcessing = (update: (previous: ProcessingState) => ProcessingState) => changeShared(() => setSharedProcessing(update(processing)));
   const copyMode = processing.mode === 'copy';
   const settings = copyMode ? SOURCE_MATCH_EDITS.settings : processing.saved.settings;
-  const setCrop = (crop: CropRect) => setProcessing(previous => updateProcessingEdits(previous, { crop }));
+  const setCrop = (crop: CropRect) => { if (!copyMode) updateClip({ crop }); };
   const setSettings = (settings: ExportSettings) => setProcessing(previous => updateProcessingEdits(previous, { settings }));
-  const [locked, setLocked] = useState(true);
   const [audio, setAudio] = useState(true);
   const [audioIndex, setAudioIndex] = useState<number | null>(null); const [downmix, setDownmix] = useState(false);
-  const [inspection, setInspection] = useState<ExportInspection | null>(null); const [draft, setDraft] = useState<ExportDraft | null>(null);
-  const [background, setBackground] = useState('#000000'); const draftDialog = useRef<HTMLDialogElement>(null);
+  const [exportPreviewId, setExportPreviewId] = useState('');
+  const [automaticPreviewCover, setAutomaticPreviewCover] = useState<string | null>(null);
+  const automaticCoverEpoch = useRef<number | null>(null);
+  const editingReturnPosition = useRef(0);
+  const editingReturnKind = useRef<typeof targetKind.current>('playhead');
+  const exportViewing = useRef(false);
+  const draftDialog = useRef<HTMLDialogElement>(null);
   const [outputOpen, setOutputOpen] = useState(false);
-  const renderingId = useRef(''); const savingId = useRef(''); const activeOperation = useRef(0);
-  const [saved, setSaved] = useState<SavedMotion | null>(null);
-  const [coverFit, setCoverFit] = useState<'cover' | 'contain'>('cover');
+  const activeOperation = useRef(0);
+  const [exportScope, setExportScope] = useState<'current' | 'all'>('all');
+  const exportSelectionId = clips.some(item => item.id === exportPreviewId) ? exportPreviewId : activeClipId;
+  const exportClips = exportScope === 'all' ? clips : clips.filter(item => item.id === exportSelectionId);
+  const exportPreviewClip = exportClips.find(item => item.id === exportPreviewId) ?? exportClips.find(item => item.id === activeClipId) ?? exportClips[0] ?? activeClip;
+  const playbackSelection = outputOpen ? exportPreviewClip.selection : clip;
+  const exportInterval = useRef<ClipSelection | null>(null); exportInterval.current = outputOpen ? exportPreviewClip.selection : null;
+  const [batchResult, setBatchResult] = useState<BatchResult | null>(null);
+  const batchRef = useRef('');
   const [hdrConsent, setHdrConsent] = useState(false);
   const [zoom, setZoom] = useState(0); const [viewStart, setViewStart] = useState(0);
+  const [readingImport, setReadingImport] = useState(false);
   const [opening, setOpening] = useState(false); const [busy, setBusy] = useState('');
   const [error, setError] = useState(''); const [notice, setNotice] = useState('');
   const [playing, setPlaying] = useState(false);
   const sequence = useRef(0); const target = useRef(0); const displayed = useRef(0);
-  const playIntent = useRef(false);
+  const playIntent = useRef(false); const playbackEnded = useRef(false);
   const duration = asset?.info.durationUs ?? 1;
   const minSpan = Math.min(duration, 500000);
   const maxZoom = Math.max(0, Math.ceil(Math.log2(duration / minSpan)));
@@ -84,14 +144,13 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
   const start = Math.min(viewStart, Math.max(0, duration - span));
   const end = Math.min(duration, start + span);
   const blocked = opening || Boolean(busy) || diagnosticsBusy || nativePreparing;
-  const previewAvailable = Boolean(nativeReady && nativeReady.assetId === asset?.id);
+  const previewAvailable = Boolean(nativeReady && nativeReady.assetId === asset?.id && !nativePreparing);
+  const previewAudioTrack = audio ? audioIndex : null;
+  const audioChoicePending = Boolean(audio && asset?.info.hasAudio && audioIndex === null);
   const compatible = !asset?.info.hdr || hdrConsent;
   const chosenAudio = audioSelection(audio, audioIndex, asset?.info.audioTracks ?? [], downmix);
-  const exportOptions: ExportOptions | null = chosenAudio ? { clip, processing: copyMode ? { mode: 'source' } : effectiveProcessing(processing), audio: chosenAudio, hdrConsent } : null;
-  const exportKey = JSON.stringify({ asset: asset?.id, clip, processing: effectiveProcessing(processing), audio, audioIndex, downmix, hdrConsent });
-  useEffect(() => { setInspection(null); setDraft(null); setOutputOpen(false); }, [exportKey]);
-  useEffect(() => { setDraft(null); setOutputOpen(false); }, [cover?.id, coverFit, background]);
-  useEffect(() => { setSaved(null); }, [draft?.id]);
+  const exportKey = JSON.stringify({ asset: asset?.id, clipId: activeClipId, revision: activeClip.revision, clip, processing: effectiveProcessing(processing), audio, audioIndex, downmix, hdrConsent });
+  useEffect(() => { setBatchResult(null); }, [exportKey]);
   useEffect(() => {
     const dialog = draftDialog.current;
     if (outputOpen && asset) { if (dialog && !dialog.open) dialog.showModal(); }
@@ -100,15 +159,15 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
   useEffect(() => {
     if (!window.motion) return;
     return window.motion.media.onExportProgress(progress => {
-    if (!activeOperation.current || progress.assetId !== assetRef.current?.id || progress.analysisId !== renderingId.current) return;
-    if (progress.saveId ? progress.saveId !== savingId.current : Boolean(savingId.current)) return;
+    if (!activeOperation.current || progress.assetId !== assetRef.current?.id) return;
+    if (!progress.batch || progress.batch.batchId !== batchRef.current) return;
     const stages: Record<string, string> = { plan: '确认剪点', audio: '处理音轨', video: '编码画面', copy: '复制原始码流',
       'verify-packets': '校验视频与音频包', 'verify-source-audio': '对照源音轨', decode: '完整解码检查', verify: '校验输出', cover: '生成封面', image: '处理封面色彩', mux: '写入实况照片', 'read-back': '回读检查格式', 'verify-jpeg': '核对照片字节',
       'verify-video-bytes': '核对视频字节', publish: '安全发布文件' };
     const detail = progress.writtenBytes !== undefined && progress.totalBytes !== undefined
       ? ` · ${(progress.writtenBytes / 1048576).toFixed(1)} / ${(progress.totalBytes / 1048576).toFixed(1)} MiB`
       : progress.timeUs === undefined ? '…' : ` · ${formatTime(Math.max(0, progress.timeUs))}`;
-    setBusy(`${stages[progress.stage] ?? '处理输出'}${detail}`);
+    setBusy(`${progress.batch ? `${progress.batch.clipName}（${progress.batch.index}/${progress.batch.total}） · ` : ''}${stages[progress.stage] ?? '处理输出'}${detail}`);
     });
   }, []);
   function report(e: unknown) {
@@ -120,7 +179,7 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
   function pause(syncPosition = true): number {
     const at = frame ? displayed.current : target.current;
     if (syncPosition && playIntent.current) { target.current = at; setPosition(at); }
-    playIntent.current = false; setPlaying(false);
+    playIntent.current = false; playbackEnded.current = false; setPlaying(false);
     if (previewAvailable) controllerRef.current?.pause();
     return at;
   }
@@ -131,38 +190,37 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
     finally { if (request === sequence.current) { activeOperation.current = 0; setBusy(''); } }
   }
   async function openVideo() {
-    pause(); ++sequence.current; activeOperation.current = 0; setBusy(''); setOpening(true); setError('');
+    pause(); ++sequence.current; activeOperation.current = 0; setBusy(''); setOpening(true); setReadingImport(false); setError(''); setNotice('');
+    const unsubscribe = window.motion.media.onImportSelected(() => setReadingImport(true));
     try {
       const selected = unwrap(await window.motion.media.open());
       if (!selected) return;
       controllerRef.current?.dispose();
-      assetRef.current = selected; setAsset(selected); setNativeReady(null); setFrame(null); setCover(null); setThumbs([]);
+      assetRef.current = selected; setAsset(selected); setNativeReady(null); setFrame(null); setThumbs([]);
       setPosition(0); target.current = displayed.current = 0;
-      setClip({ startUs: 0, endUs: selected.info.durationUs }); setLocked(true);
-      setProcessing(createProcessingState());
-      setAudio(selected.info.hasAudio); setAudioIndex(initialAudioTrack(selected.info.audioTracks)); setDownmix(false); setBackground('#000000');
-      setHdrConsent(false); setZoom(0); setViewStart(0); setNotice('');
-    } catch (e) { report(e); } finally { setOpening(false); }
-  }
-  async function cancelOpening() {
-    try { unwrap(await window.motion.media.cancelImport()); setNotice('导入已取消。'); }
-    catch (e) { report(e); }
+      commitClips([{ ...createClip(selected.id, { startUs: 0, endUs: selected.info.durationUs }, selected.info.durationUs), cover: null }], false);
+      activeClipRef.current = selected.id; setActiveClipId(selected.id); nextClipNumber.current = 2; clipSync.current = Promise.resolve();
+      setSharedProcessing(createProcessingState()); setExportScope('all'); setBatchResult(null); setOutputOpen(false);
+      setAudio(selected.info.hasAudio); setAudioIndex(initialAudioTrack(selected.info.audioTracks)); setDownmix(false);
+      setHdrConsent(false); setForceStrict(false); setZoom(0); setViewStart(0); setNotice('');
+    } catch (e) { report(e); } finally { unsubscribe(); setOpening(false); setReadingImport(false); }
   }
   async function closeVideo() {
     if (!asset) return;
     pause(); ++sequence.current; activeOperation.current = 0; setBusy('正在关闭素材');
     try {
       unwrap(await window.motion.media.close({ assetId: asset.id })); assetRef.current = null; setAsset(null);
-      controllerRef.current?.dispose(); setNativeReady(null); setFrame(null); setCover(null); setThumbs([]); setError('');
+      controllerRef.current?.dispose(); setNativeReady(null); setFrame(null); commitClips([], false); setThumbs([]); setError('');
     } catch (e) { report(e); } finally { setBusy(''); }
   }
   async function cancel() {
     if (!asset || !activeOperation.current) return;
-    const saveId = savingId.current;
-    pause(); ++sequence.current; activeOperation.current = 0; renderingId.current = '';
+    const batchId = batchRef.current;
+    pause(); ++sequence.current; activeOperation.current = 0;
     try {
-      const result = unwrap(await window.motion.media.cancel({ assetId: asset.id, ...(saveId ? { saveId } : {}) }));
-      if (result.saved) { setSaved(result.saved); setNotice(`已保存 ${result.saved.name}；取消请求到达时已完成发布。`); }
+      const result = unwrap(await window.motion.media.cancel({ assetId: asset.id, ...(batchId ? { batchId } : {}) }));
+      if (result.batch) { setBatchResult(result.batch); setNotice(`批次已停止；保留 ${result.batch.saved.length} 个已发布文件。`); }
+      else if (result.saved) setNotice(`已保存 ${result.saved.name}`);
       else setNotice('处理已取消，未发布新的成品。');
     } catch (e) { report(e); } finally { setBusy(''); }
   }
@@ -173,53 +231,72 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
       send: request => window.motion.media.native.control(request),
       acknowledge: request => window.motion.media.native.acknowledge(request),
       frame: pixels => {
+        const range = exportViewing.current ? exportInterval.current : null;
+        if (range && (pixels.timeUs < range.startUs || pixels.timeUs >= range.endUs)) {
+          ctl.drop(pixels); setFrame(null);
+          if (pixels.timeUs >= range.endUs && automaticCoverEpoch.current !== pixels.epoch) ctl.seek(range.endUs, 'before');
+          else { if (playIntent.current) ctl.pause(); playIntent.current = false; setPlaying(false); setError('选段内没有可预览的画面，请调整范围。'); }
+          return;
+        }
         if (assetRef.current?.id === id && surface.current) surface.current.enqueue(pixels);
         else ctl.drop(pixels);
       },
       displayed: stamp => {
         if (assetRef.current?.id !== id) return;
         setFrame(stamp); displayed.current = stamp.timeUs;
+        if (exportViewing.current && automaticCoverEpoch.current === stamp.epoch) {
+          setAutomaticPreviewCover(surface.current?.snapshot() ?? null); automaticCoverEpoch.current = null;
+        }
         if (!ctl.isDragging && stamp.epoch === ctl.epoch && !['start', 'end'].includes(targetKind.current)) {
           target.current = stamp.timeUs; setPosition(stamp.timeUs);
         }
       },
       error: failure => { if (assetRef.current?.id === id) report(failure); },
-    });
+    }, previewEpoch.current);
     controllerRef.current = ctl; setController(ctl);
     const unsubscribeFrame = window.motion.media.native.onFrame(pixels => { if (pixels.assetId === id) ctl.receive(pixels); });
     const unsubscribeStatus = window.motion.media.native.onStatus(status => {
       if (assetRef.current?.id !== id || !ctl.acceptsStatus(status)) return;
       if (status.state === 'preparing') {
         const labels = { 'source-index': '建立源帧索引', 'native-index': '核对原生帧映射', compatibility: '准备整片兼容素材', audio: '核对并准备音轨' };
-        setNativeProgress(`${status.stage ? labels[status.stage] : '准备原生预览'}${status.frames !== undefined ? ` · ${status.frames} 个样本` : ''}${status.bytes !== undefined ? ` · ${(status.bytes / 1048576).toFixed(1)} MiB` : ''}`);
+        setNativeProgress(`${status.reason ? `${status.reason} · ` : ''}${status.stage ? labels[status.stage] : '准备原生预览'}${status.frames !== undefined ? ` · ${status.frames} 个样本` : ''}${status.bytes !== undefined ? ` · ${(status.bytes / 1048576).toFixed(1)} MiB` : ''}`);
       }
       if (status.state === 'playing' || status.state === 'paused' || status.state === 'failed') {
+        if (status.state === 'paused' && !status.error && playIntent.current) playbackEnded.current = true;
         playIntent.current = status.state === 'playing'; setPlaying(status.state === 'playing');
       }
       if (status.state === 'failed') { ctl.dispose(); setNativeReady(null); setFrame(null); }
       if (status.error) report(Object.assign(new Error(status.error.message), { code: status.error.code }));
     });
-    return () => { ctl.dispose(); unsubscribeFrame(); unsubscribeStatus(); if (controllerRef.current === ctl) controllerRef.current = null; };
-  }, [asset?.id]);
+    return () => { previewEpoch.current = Math.max(previewEpoch.current, ctl.epoch); ctl.dispose(); unsubscribeFrame(); unsubscribeStatus(); if (controllerRef.current === ctl) controllerRef.current = null; };
+  }, [asset?.id, prepareAttempt]);
   useEffect(() => {
     let active = true; setNativeReady(null); setFrame(null);
-    if (!asset || !compatible) { if (nativeReady?.assetId === asset?.id && nativeReady) controllerRef.current?.pause(); setNativePreparing(false); return; }
+    if (!asset || !compatible || audioChoicePending) { if (nativeReady?.assetId === asset?.id && nativeReady) controllerRef.current?.pause(); setNativePreparing(false); return; }
     setNativePreparing(true); setNativeProgress('准备原生预览…');
-    window.motion.media.native.prepare({ assetId: asset.id, hdrConsent }).then(unwrap).then(result => {
+    window.motion.media.native.prepare({ assetId: asset.id, hdrConsent, audioTrack: previewAudioTrack, forceStrict }).then(unwrap).then(result => {
       if (active && assetRef.current?.id === result.assetId) { setNativeReady(result); setError(''); }
     }).catch(failure => { if (active) report(failure); }).finally(() => { if (active) setNativePreparing(false); });
     return () => { active = false; };
-  }, [asset?.id, hdrConsent, prepareAttempt]);
+  }, [asset?.id, hdrConsent, prepareAttempt, previewAudioTrack, audioChoicePending, forceStrict]);
   useEffect(() => {
     if (previewAvailable && controller) {
-      targetKind.current = 'playhead'; controller.seek(target.current, target.current >= duration ? 'before' : 'after');
+      playIntent.current = false; playbackEnded.current = false; setPlaying(false); setFrame(null);
+      const at = outputOpen ? exportPreviewClip.selection.startUs : target.current;
+      if (outputOpen) targetKind.current = 'playhead';
+      target.current = at; setPosition(at);
+      setAutomaticPreviewCover(null);
+      controller.seek(at, targetKind.current === 'end' || at >= duration ? 'before' : 'after');
+      automaticCoverEpoch.current = outputOpen ? controller.epoch : null;
     }
-  }, [nativeReady, controller]);
+  }, [nativeReady, controller, previewAvailable, outputOpen, outputOpen ? exportPreviewClip.id : null]);
   const thumbnailsReady = previewAvailable;
   useEffect(() => {
-    let active = true; setThumbs([]);
-    if (!asset || !compatible || !thumbnailsReady) { setThumbBusy(false); return; }
+    let active = true;
+    if (!asset || !compatible || !thumbnailsReady) { setThumbs([]); setThumbBusy(false); return; }
     setThumbBusy(true);
+    // Viewport-only requests, deduplicated by range: keep the previous strip visible while the
+    // superseding request runs (the main-process background lane cancels the stale one).
     window.motion.media.thumbnails({ assetId: asset.id, startUs: start, endUs: end, count: 8, hdrConsent })
       .then(unwrap).then(result => { if (active) setThumbs(result); })
       .catch(e => { if (active) report(e); }).finally(() => { if (active) setThumbBusy(false); });
@@ -249,94 +326,165 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
   function playAt(at: number) {
     if (!previewAvailable) return;
     if (audio && audioIndex === null) { setError('请先选择要预览的音轨，或关闭音轨。'); return; }
-    targetKind.current = 'play'; target.current = at; setPosition(at); playIntent.current = true;
-    controllerRef.current?.play(at, clip.endUs, audio ? audioIndex : null);
+    targetKind.current = 'play'; target.current = at; setPosition(at); playIntent.current = true; playbackEnded.current = false; setPlaying(true);
+    controllerRef.current?.play(at, playbackSelection.endUs, audio ? audioIndex : null);
   }
-  function changeClip(next: ClipSelection) {
-    try { setClip(validateClip(next, duration)); setError(''); } catch (e) { report(e); }
+  function changeClip(next: ClipSelection, id = activeClipRef.current) {
+    try { updateClip({ selection: validateClip(next, duration) }, id); setError(''); } catch (e) { report(e); }
+  }
+  function activateClip(id: string) {
+    if (id === activeClipRef.current) return;
+    pause(); activeClipRef.current = id; setActiveClipId(id); setOutputOpen(false);
+  }
+  function addClip() {
+    if (!asset || clipsRef.current.length >= MAX_CLIPS) return;
+    pause(); const id = crypto.randomUUID();
+    const next = { ...createClip(id, clipSelectionAt(position, duration), duration, nextClipNumber.current++), cover: null };
+    commitClips([...clipsRef.current, next]); activateClip(id);
+  }
+  function deleteClip(id: string) {
+    if (clipsRef.current.length <= 1) return;
+    pause(); const remaining = clipsRef.current.filter(item => item.id !== id);
+    commitClips(remaining);
+    if (activeClipRef.current === id) activateClip(remaining[0]!.id);
   }
   async function capture() {
     if (!asset) return;
-    const shown = controllerRef.current?.confirmed;
-    if (!shown) { setNotice('请等待当前画面确认后选作封面。'); return; }
-    const captureRequest = window.motion.media.native.capture({ assetId: asset.id, frameId: shown.frameId });
-    pause();
-    await primary('固定当前封面…', async () => unwrap(await captureRequest), setCover);
+    await primary('固定当前封面…', async () => {
+      const ref = await syncedClip(); const shown = controllerRef.current?.confirmed;
+      if (!shown) throw new Error('请等待当前画面确认后选作封面。');
+      const request = window.motion.media.native.capture({ assetId: asset.id, ...ref, frameId: shown.frameId, epoch: shown.epoch });
+      pause(); return { ref, cover: unwrap(await request) };
+    }, result => acceptCover(result.ref, result.cover));
   }
   async function upload() {
     if (!asset) return; pause();
-    await primary('选择自定义封面…', async () => unwrap(await window.motion.media.uploadCover({ assetId: asset.id })), result => { if (result) setCover(result); });
+    await primary('选择自定义封面…', async () => {
+      const ref = await syncedClip(); return { ref, cover: unwrap(await window.motion.media.uploadCover({ assetId: asset.id, ...ref })) };
+    }, result => { if (result.cover) acceptCover(result.ref, result.cover); });
   }
-  async function previewOutput() {
-    if (!asset) return;
-    setOutputOpen(true); setDraft(null); setSaved(null); setInspection(null); setError(''); setNotice('');
-    if (!exportOptions) {
-      setError('请选择要保留的音轨，或取消“保留音轨”。不会自动选择或导出静音。');
-      return;
-    }
-    const requested = exportOptions;
+  async function automaticCover() {
+    if (!asset) return; pause();
+    await primary('恢复自动封面…', async () => {
+      const ref = await syncedClip(); unwrap(await window.motion.media.clearCover({ assetId: asset.id, ...ref })); return ref;
+    }, ref => acceptCover(ref, null));
+  }
+  function togglePlayback() {
+    if (blocked || !compatible || !previewAvailable || !frame) return;
+    if (playIntent.current) pause();
+    else playAt(playbackEnded.current || position < playbackSelection.startUs || position >= playbackSelection.endUs ? playbackSelection.startUs : position);
+  }
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing || event.defaultPrevented) return;
+      const element = event.target instanceof Element ? event.target : null;
+      if (element?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="slider"], summary, a')) return;
+      // Space is the transport shortcut even after clicking an editor command.
+      // Enter still activates focused buttons; text/checkbox/select/slider inputs keep their native keys.
+      const modal = document.querySelector('dialog[open]');
+      if (modal && modal !== draftDialog.current) return;
+      if (!asset) return;
+      event.preventDefault();
+      if (!event.repeat) togglePlayback();
+    };
+    window.addEventListener('keydown', keydown);
+    return () => window.removeEventListener('keydown', keydown);
+  });
+  function selectExportPreview(id: string) {
+    if (blocked) return;
+    pause(false); setExportPreviewId(id);
+    if (id === exportPreviewClip.id) seekExportPreview(exportPreviewClip.selection.startUs);
+  }
+  function seekExportPreview(at: number) {
+    if (blocked || !previewAvailable) return;
+    const range = exportPreviewClip.selection;
+    const bounded = Math.max(range.startUs, Math.min(range.endUs, at));
+    pause(false); targetKind.current = 'playhead'; target.current = bounded; setPosition(bounded);
+    controllerRef.current?.seek(bounded, bounded >= range.endUs ? 'before' : 'after');
+  }
+  function closeExport() {
+    if (blocked) return;
+    pause(false); exportViewing.current = false; automaticCoverEpoch.current = null;
+    targetKind.current = editingReturnKind.current;
+    target.current = editingReturnPosition.current; setPosition(target.current); setFrame(null);
+    setOutputOpen(false);
+  }
+  async function exportAll() {
+    if (!asset || !chosenAudio) { setError('请选择音轨或关闭声音。'); return; }
+    const selected = exportScope === 'all' ? clipsRef.current : clipsRef.current.filter(item => item.id === exportPreviewClip.id);
+    const snapshot: BatchSnapshot = { assetId: asset.id, batchId: crypto.randomUUID(),
+      mode: copyMode ? 'source' : 'encode', settings: { ...settings }, audio: { ...chosenAudio }, hdrConsent,
+      clips: selected.map(item => ({ clipId: item.id, revision: item.revision, selection: { ...item.selection }, crop: { ...item.crop },
+        cover: item.cover ? { kind: item.cover.kind, coverId: item.cover.id } : { kind: 'auto' },
+        coverFit: item.coverFit, background: item.background })) };
     pause();
-    await primary('分析实际剪点…', async () => {
-      const current = sequence.current;
-      const analyzed = unwrap(await window.motion.media.analyze({ assetId: asset.id, options: requested }));
-      if (current !== sequence.current) return null;
-      setInspection(analyzed);
-      if (!analyzed.supported) throw new Error(analyzed.reasons.join('；') || '当前设置不支持导出，请关闭此窗口后调整参数。');
-      renderingId.current = analyzed.id;
-      try { return unwrap(await window.motion.media.renderDraft({ assetId: asset.id, analysisId: analyzed.id, image: { fit: coverFit, background } })); }
-      finally { renderingId.current = ''; }
-    }, result => { if (result) setDraft(result); });
-  }
-  async function saveMotion() {
-    if (!asset || !draft || !savingReady) return;
-    draftDialog.current?.querySelector('video')?.pause();
-    setSaved(null);
-    const saveId = crypto.randomUUID(); savingId.current = saveId; renderingId.current = draft.analysisId;
+    setBatchResult(null); batchRef.current = snapshot.batchId;
     try {
-      await primary('选择保存位置…', async () => unwrap(await window.motion.media.saveDraft({ assetId: asset.id, draftId: draft.id, saveId })), result => {
-        if (result) { setSaved(result); setNotice(`已保存 ${result.name}`); }
-        else setNotice('已取消保存位置选择，未发布新的成品。');
-      });
-    } finally { if (savingId.current === saveId) { savingId.current = ''; renderingId.current = ''; } }
+      await primary('选择导出文件夹…', async () => {
+        await clipSync.current;
+        return unwrap(await window.motion.media.exportAll({ assetId: snapshot.assetId, snapshot }));
+      }, setBatchResult);
+    } finally { if (batchRef.current === snapshot.batchId) batchRef.current = ''; }
   }
   function exportMotion() {
-    if (draft) setOutputOpen(true); else void previewOutput();
+    const wasPlaying = playIntent.current; const at = pause();
+    editingReturnPosition.current = wasPlaying ? at : position;
+    editingReturnKind.current = targetKind.current; exportViewing.current = true;
+    setExportPreviewId(activeClipRef.current); setFrame(null); setError(''); setNotice(''); setBatchResult(null); setOutputOpen(true);
   }
-  const importButton = <><button className="primary-button" data-testid="open-video" disabled={!ready || blocked} onClick={() => void openVideo()}>{preparing ? '正在准备引擎…' : opening ? '正在读取视频信息…' : asset ? '更换视频' : '导入本地视频'}</button>
-    {(opening || nativePreparing) && <button onClick={() => void cancelOpening()}>取消导入</button>}</>;
-  if (!asset) return <section className="editor-welcome">
-    <div className="welcome-canvas"><div className="welcome-content"><div className="import-symbol" aria-hidden="true">＋</div>
-      <h2>把视频，留在一张照片里</h2><p className="muted">选择视频 · 调整片段 · 定格封面</p>{importButton}
-      <p className="hint">支持 MP4、MOV 等本地视频 · 不上传素材</p>
-      {opening && <p className="hint" role="status">正在读取文件信息；不会先复制整个视频。读取后建立原生帧索引，必要时准备整片兼容素材。</p>}
-      {notice && <p className="hint">{notice}</p>}{error && <p role="alert" className="error">{error}</p>}
-    </div></div><div className="welcome-track" aria-hidden="true"><span>01</span><div /><div /><div /><div /><div /></div>
-  </section>;
+  const importButton = <button className="primary-button" data-testid="open-video" disabled={!ready || blocked} onClick={() => void openVideo()}>
+    {!asset && <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/><path d="M8 13h8m-4-4v8"/></svg>}
+    {preparing ? '正在准备引擎…' : opening ? readingImport ? '正在打开视频…' : '正在选择视频…' : asset ? '更换视频' : '选择本地视频'}
+  </button>;
+  if (!asset) return <ImportWelcome action={importButton} phase={opening ? readingImport ? 'reading' : 'choosing' : 'idle'} error={error} notice={notice} />;
   if (asset.info.displayWidth < 2 || asset.info.displayHeight < 2) return <section className="panel">画面尺寸小于 2 像素，暂不支持偶数像素裁剪。{importButton}<button onClick={() => void closeVideo()}>关闭素材</button></section>;
   const pixels = copyMode ? { x: 0, y: 0, width: asset.info.displayWidth, height: asset.info.displayHeight }
     : cropToPixels(previewCrop(processing), asset.info.displayWidth, asset.info.displayHeight);
   const visibleCrop = { x: pixels.x / asset.info.displayWidth, y: pixels.y / asset.info.displayHeight,
     width: pixels.width / asset.info.displayWidth, height: pixels.height / asset.info.displayHeight };
+  const exportPixels = copyMode ? { x: 0, y: 0, width: asset.info.displayWidth, height: asset.info.displayHeight }
+    : cropToPixels(exportPreviewClip.crop, asset.info.displayWidth, asset.info.displayHeight);
+  const exportCrop = { x: exportPixels.x / asset.info.displayWidth, y: exportPixels.y / asset.info.displayHeight,
+    width: exportPixels.width / asset.info.displayWidth, height: exportPixels.height / asset.info.displayHeight };
+  const previewCover = exportPreviewClip.cover;
+  const exportCoverUrl = previewCover?.url ?? automaticPreviewCover;
+  const audioControls = <>          <label className="check"><input type="checkbox" aria-label="保留音轨" checked={audio} disabled={blocked || !asset.info.hasAudio} onChange={e => { pause(); changeShared(() => setAudio(e.target.checked)); }} />保留原视频音轨</label>
+          {audio && asset.info.audioTracks.length > 1 && <label className="field">保留音轨<select aria-label="所保留的音轨" disabled={blocked} value={audioIndex ?? ''} onChange={e => { pause(); changeShared(() => setAudioIndex(e.target.value === '' ? null : Number(e.target.value))); }}><option value="" disabled>请选择音轨 · 不会自动丢轨</option>{asset.info.audioTracks.map(track => <option key={track.index} value={track.index}>轨道 {track.index} · {track.codec} · {track.channels ?? '?'} 声道</option>)}</select></label>}
+</>;
+  const outputSettings = (<section className="panel"><h3>输出设置</h3>
+          {outputOpen && <div className="export-audio-controls">{audioControls}</div>}
+          <label className="check mode-switch"><input type="checkbox" aria-label="原画质（跟随原片）" data-testid="source-matching" checked={copyMode} disabled={blocked} onChange={e => { pause(); setProcessing(previous => setProcessingMode(previous, e.target.checked ? 'copy' : 'encode')); }} />原画质（跟随原片）</label>
+          {copyMode && <p className="hint">保留原片规格，不应用裁剪；兼容编码，非无损。</p>}
+          <label className="field">输出帧率<select aria-label="输出帧率" disabled={blocked || copyMode} value={settings.fps ?? 'original'} onChange={e => setSettings({ ...settings, fps: e.target.value === 'original' ? null : Number(e.target.value) })}><option value="original">保持原片</option>{[24, 25, 30, 50, 60, 120].map(fps => <option key={fps} value={fps}>{fps} fps</option>)}</select></label>
+          <label className="field">分辨率<select aria-label="分辨率" disabled={blocked || copyMode} value={settings.resolution} onChange={e => setSettings({ ...settings, resolution: e.target.value === 'original' ? 'original' : Number(e.target.value) as ExportSettings['resolution'] })}><option value="original">保留裁剪后分辨率</option>{[720, 1080, 1440, 2160].map(size => <option key={size} value={size}>最长边 {size} px</option>)}</select></label>
+          <label className="field">画质 CRF · {settings.crf}<input aria-label="画质 CRF" disabled={blocked || copyMode} type="range" min="0" max="51" step="1" value={settings.crf} onChange={e => setSettings({ ...settings, crf: Number(e.target.value) })} /></label>
+          <p className="hint">数值越低，质量越高，文件通常越大。</p>
+          {audio && (asset.info.audioTracks.find(t => t.index === audioIndex)?.channels ?? 0) > 2 && <label className="check"><input type="checkbox" aria-label="同意降混为立体声" disabled={blocked || copyMode} checked={downmix} onChange={e => changeShared(() => setDownmix(e.target.checked))} />同意仅将音频降混为立体声</label>}
+
+
+
+        </section>);
+  const toolbarHost = document.getElementById('editor-toolbar');
   return <section data-testid="editor" className="editor">
-    <div className="editor-heading"><div className="asset-heading"><span className="asset-symbol" aria-hidden="true">▤</span><div><h2 data-testid="asset-name" title={asset.name}>{asset.name}</h2>
+    {toolbarHost && createPortal(<><div className="asset-heading"><div><h2 data-testid="asset-name" title={asset.name}>{asset.name}</h2>
       <p className="hint">{asset.info.displayWidth} × {asset.info.displayHeight} · {formatTime(duration)}</p></div></div>
-      <div className="button-row">{importButton}<button disabled={opening || Boolean(savingId.current)} onClick={() => void closeVideo()}>关闭素材</button>
-        <button data-testid="preview-output" disabled={blocked || !compatible && !copyMode} onClick={() => void previewOutput()}>预览输出</button>
-        <button data-testid="export-motion" className="primary-button export-button" disabled={blocked || !savingReady || !compatible && !copyMode} onClick={exportMotion}>导出实况</button></div></div>
+      <div className="button-row file-actions">{importButton}<button disabled={opening || Boolean(busy) || Boolean(batchRef.current)} onClick={() => void closeVideo()}>关闭素材</button>
+      <button data-testid="export-motion" className="primary-button export-button" disabled={blocked || !savingReady || !compatible} onClick={exportMotion}>导出实况 ↗</button></div></>, toolbarHost)}
     {asset.info.hdr && <label className="warning check"><input type="checkbox" aria-label="同意 HDR 转 SDR" checked={hdrConsent} disabled={blocked}
-      onChange={e => setHdrConsent(e.target.checked)} />这是 HDR 视频。我同意将预览、封面和导出统一转换为 SDR（源文件不变，不保留 HDR 效果）。</label>}
+      onChange={e => changeShared(() => setHdrConsent(e.target.checked))} />这是 HDR 视频。我同意将预览、封面和导出统一转换为 SDR（源文件不变，不保留 HDR 效果）。</label>}
     <div className="workspace">
       <div className="editing-main panel">
-        <div className="preview-caption"><strong>{!previewAvailable ? '原生预览未就绪' : nativeReady?.compatibility ? '兼容素材 · 原生低清预览，非成品' : '原片解码 · 原生低清预览，非成品'}</strong>
-          {frame && <span data-testid="displayed-frame" data-pts={frame.pts}>已显示 {formatTime(frame.timeUs)} · 源帧 {frame.sourceFrame + 1}</span>}
-          {!previewAvailable && compatible && !nativePreparing && <button onClick={() => setPrepareAttempt(value => value + 1)}>准备预览</button>}</div>
+        <div className="preview-caption"><strong title="编辑为低清预览，成品从原片处理">{!previewAvailable ? '正在准备画面' : nativeReady?.compatibility ? '兼容预览' : '编辑预览'}</strong>
+          {frame && <span data-testid="displayed-frame" data-pts={frame.pts ?? ''}>已显示 {formatTime(frame.timeUs)} · {frame.pts === null ? '源帧待核对' : frame.sourceFrame === null ? `源 PTS ${frame.pts}` : `源帧 ${frame.sourceFrame + 1}`}</span>}
+          {!previewAvailable && compatible && !nativePreparing && <button onClick={() => setPrepareAttempt(value => value + 1)}>准备预览</button>}
+          {compatible && !blocked && !forceStrict && <button onClick={() => { pause(); setForceStrict(true); setPrepareAttempt(value => value + 1); }}>精确兼容准备（较慢）</button>}</div>
         {nativeReady?.warnings.length ? <details className="hint"><summary>预览处理说明</summary>{nativeReady.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</details> : null}
         <CropStage width={asset.info.displayWidth} height={asset.info.displayHeight} crop={visibleCrop} locked={locked} disabled={blocked || copyMode} showOverlay={!copyMode} onChange={setCrop} onEdit={pause}>
-          <PreviewSurface key={asset.id} ref={surface} controller={controller} enabled={previewAvailable && compatible} />
-          {!previewAvailable && compatible && <div className="preview-buffering" role="status">{nativePreparing ? nativeProgress : '请准备预览或重新导入素材'}<br />完成准备后播放、拖动和选帧均由常驻引擎处理。</div>}
+          {!outputOpen && <PreviewSurface key={asset.id} ref={surface} controller={controller} enabled={previewAvailable && compatible} />}
+          {!previewAvailable && compatible && <div className="preview-buffering" role="status">{audioChoicePending ? '请选择要预览的音轨，或明确关闭音轨；确认后一起准备画面与声音。' : nativePreparing ? nativeProgress : '请准备预览或重新导入素材'}</div>}
           {!compatible && <div className="stage-message">请先确认 HDR 转 SDR 策略</div>}
         </CropStage>
-        <div className="transport button-row"><button data-testid="play-video" disabled={blocked || !compatible || !previewAvailable} onClick={() => playing ? pause() : void playAt(position < clip.startUs || position >= clip.endUs ? clip.startUs : position)}>{playing ? '暂停' : '播放选段'}</button>
+        <div className="transport button-row"><button data-testid="play-video" data-playback-control title="空格：播放 / 暂停" disabled={blocked || !compatible || !previewAvailable || !frame} onClick={togglePlayback}>{playing ? '暂停' : '播放选段'}</button>
           <button aria-label="上一帧" disabled={blocked || !compatible || !previewAvailable || !frame} onClick={() => void step(-1)}>◀ 帧</button>
           <button aria-label="下一帧" disabled={blocked || !compatible || !previewAvailable || !frame} onClick={() => void step(1)}>帧 ▶</button>
           <output data-testid="playhead">{formatTime(position)}</output></div>
@@ -348,68 +496,109 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
         <section className="panel"><h3>封面</h3>
           <div className="cover-preview" style={{ aspectRatio: `${pixels.width} / ${pixels.height}`, width: `min(100%, ${140 * pixels.width / pixels.height}px)` }}>
             {cover ? <img data-testid="cover-preview" src={cover.url} alt={cover.name} style={cover.kind === 'custom' ? { width: '100%', height: '100%', objectFit: coverFit }
-              : { position: 'absolute', width: `${100 / visibleCrop.width}%`, height: `${100 / visibleCrop.height}%`, maxWidth: 'none', left: `${-visibleCrop.x / visibleCrop.width * 100}%`, top: `${-visibleCrop.y / visibleCrop.height * 100}%` }} /> : <span>尚未选择封面</span>}
+              : { position: 'absolute', width: `${100 / visibleCrop.width}%`, height: `${100 / visibleCrop.height}%`, maxWidth: 'none', left: `${-visibleCrop.x / visibleCrop.width * 100}%`, top: `${-visibleCrop.y / visibleCrop.height * 100}%` }} /> : <span>自动使用本段实际首帧</span>}
           </div>
           <div className="button-row"><button data-testid="capture-cover" disabled={blocked || !compatible || !previewAvailable || !frame} onClick={() => void capture()}>使用当前帧</button><button data-testid="upload-cover" disabled={blocked} onClick={() => void upload()}>上传 JPG / PNG</button></div>
+          {cover && <button disabled={blocked} onClick={() => void automaticCover()}>恢复自动首帧封面</button>}
+          {cover?.timeUs !== null && cover?.timeUs !== undefined && (cover.timeUs < clip.startUs || cover.timeUs >= clip.endUs) && <p className="hint">手选封面位于本段范围外，将作为独立封面保留。</p>}
           {cover && <p className="hint" data-testid="cover-description">{cover.name}{cover.timeUs !== null ? ` · ${formatTime(cover.timeUs)}` : ' · 独立封面'}</p>}
           {cover?.kind === 'custom' && <label className="field">封面适配<select aria-label="封面适配" disabled={blocked} value={coverFit} onChange={e => setCoverFit(e.target.value as 'cover' | 'contain')}><option value="cover">居中裁切，不拉伸</option><option value="contain">完整保留，黑色留边</option></select></label>}
-        </section>
-        <section className="panel"><h3>输出参数</h3>
-          <label className="check mode-switch"><input type="checkbox" aria-label="原画质（跟随原片）" data-testid="source-matching" checked={copyMode} disabled={blocked} onChange={e => { pause(); setProcessing(previous => setProcessingMode(previous, e.target.checked ? 'copy' : 'encode')); }} />原画质（跟随原片）</label>
-          {copyMode && <p className="hint">跟随原片分辨率、帧时序、音频采样率和声道数；视频高保真编码，音频采用 AAC-LC 兼容编码，非严格无损。关闭后恢复手动设置。</p>}
-          <label className="field">输出帧率<select aria-label="输出帧率" disabled={blocked || copyMode} value={settings.fps ?? 'original'} onChange={e => setSettings({ ...settings, fps: e.target.value === 'original' ? null : Number(e.target.value) })}><option value="original">保持原片</option>{[24, 25, 30, 50, 60, 120].map(fps => <option key={fps} value={fps}>{fps} fps</option>)}</select></label>
-          <label className="field">分辨率<select aria-label="分辨率" disabled={blocked || copyMode} value={settings.resolution} onChange={e => setSettings({ ...settings, resolution: e.target.value === 'original' ? 'original' : Number(e.target.value) as ExportSettings['resolution'] })}><option value="original">保留裁剪后分辨率</option>{[720, 1080, 1440, 2160].map(size => <option key={size} value={size}>最长边 {size} px</option>)}</select></label>
-          <label className="field">画质 CRF · {settings.crf}<input aria-label="画质 CRF" disabled={blocked || copyMode} type="range" min="0" max="51" step="1" value={settings.crf} onChange={e => setSettings({ ...settings, crf: Number(e.target.value) })} /></label>
-          <p className="hint">数值越低，质量越高，文件通常越大。</p>
-          <label className="check"><input type="checkbox" aria-label="保留音轨" checked={audio} disabled={blocked || !asset.info.hasAudio} onChange={e => { pause(); setAudio(e.target.checked); }} />保留原视频音轨</label>
-          {audio && asset.info.audioTracks.length > 1 && <label className="field">保留音轨<select aria-label="所保留的音轨" disabled={blocked} value={audioIndex ?? ''} onChange={e => { pause(); setAudioIndex(e.target.value === '' ? null : Number(e.target.value)); }}><option value="" disabled>请选择音轨 · 不会自动丢轨</option>{asset.info.audioTracks.map(track => <option key={track.index} value={track.index}>轨道 {track.index} · {track.codec} · {track.channels ?? '?'} 声道</option>)}</select></label>}
-          {audio && (asset.info.audioTracks.find(t => t.index === audioIndex)?.channels ?? 0) > 2 && <label className="check"><input type="checkbox" aria-label="同意降混为立体声" disabled={blocked || copyMode} checked={downmix} onChange={e => setDownmix(e.target.checked)} />同意仅将音频降混为立体声</label>}
           {cover?.kind === 'custom' && <label className="field background-choice">透明区 / 留边背景<input aria-label="封面背景" type="color" value={background} disabled={blocked} onChange={e => setBackground(e.target.value)} /></label>}
-          <p className="hint subtle-note">主画面是原片或兼容素材的低清预览；成品仍从原片处理。点击“预览输出”检查实际结果。</p>
-          {inspection && <div className="inspection" data-testid="export-inspection"><p>请求 {formatTime(inspection.requested.startUs)} — {formatTime(inspection.requested.endUs)}</p>
-            {inspection.actual && <p data-testid="actual-interval">实际 {formatTime(inspection.actual.startUs)} — {formatTime(inspection.actual.endUs)}</p>}
-            {inspection.reasons.map((reason, i) => <p className="warning" key={i}>{reason}</p>)}
-          </div>}
+        </section>
+        <section className="panel audio-panel"><h3>声音</h3>
+          {!outputOpen && audioControls}
         </section>
       </aside>
     </div>
     <section className="timeline-panel panel" aria-label="片段剪辑">
-      <div className="timeline-head"><div className="button-row"><strong>片段</strong><span data-testid="clip-duration">选段 {formatTime(clip.endUs - clip.startUs)}</span></div>
+      <div className="timeline-head"><div className="button-row"><strong>片段 {activeClip.number} / 共 {clips.length} 段</strong><button data-testid="add-clip" disabled={opening || Boolean(busy) || diagnosticsBusy || clips.length >= MAX_CLIPS} onClick={addClip}>＋ 添加片段</button><span data-testid="clip-duration">选段 {formatTime(clip.endUs - clip.startUs)}</span></div>
         <div className="button-row"><button disabled={blocked} onClick={() => { pause(); setZoom(0); setViewStart(0); changeClip({ startUs: 0, endUs: duration }); }}>全选片段</button>
           <label className="zoom-control">−<input aria-label="时间轴缩放" type="range" min="0" max={maxZoom} step="1" value={zoom} disabled={blocked} onChange={e => {
             const next = Number(e.target.value); const width = Math.max(minSpan, Math.round(duration / 2 ** next));
             setZoom(next); setViewStart(Math.max(0, Math.min(duration - width, position - width / 2)));
           }} />＋</label></div></div>
-      <Timeline key={asset.id} durationUs={duration} startUs={start} endUs={end} selection={clip} positionUs={position} thumbnails={thumbs}
-        disabled={blocked || !compatible || !previewAvailable} loading={thumbBusy} onSelect={changeClip} onInteraction={interact} />
+      <div className="clip-tabs" aria-label="切换片段（重叠选区可用编号选择）">{clips.map(item => <div key={item.id} className={`clip-tab ${item.id === activeClipId ? 'is-active' : ''}`}>
+        <button aria-pressed={item.id === activeClipId} disabled={opening || Boolean(busy) || diagnosticsBusy}
+          title={`${formatTime(item.selection.startUs)} — ${formatTime(item.selection.endUs)} · ${formatTime(item.selection.endUs - item.selection.startUs)}`}
+          onClick={() => activateClip(item.id)}>片段 {String(item.number).padStart(2, '0')}</button>
+        <button aria-label={`删除片段 ${item.number}`} disabled={clips.length === 1 || opening || Boolean(busy) || diagnosticsBusy} onClick={() => deleteClip(item.id)}>×</button>
+      </div>)}</div>
+      <Timeline key={asset.id} durationUs={duration} startUs={start} endUs={end} clips={clips} activeClipId={activeClipId} positionUs={position} thumbnails={thumbs}
+        disabled={opening || Boolean(busy) || diagnosticsBusy} loading={thumbBusy} onActivate={activateClip} onSelect={changeClip} onInteraction={interact} />
       {span < duration && <label className="viewport-scroll">平移<input aria-label="时间轴视口起点" type="range" min="0" max={duration - span} step="1000" value={start} disabled={blocked} onChange={e => setViewStart(Number(e.target.value))} /></label>}
       <div className="timeline-bottom"><div className="time-fields"><TimeField label="截取开始" value={clip.startUs} disabled={blocked} change={value => { const next = validateClip({ ...clip, startUs: value }, duration); changeClip(next); interact({ kind: 'start', phase: 'keyboard', timeUs: next.startUs }); }} error={setError} />
         <TimeField label="截取结束" value={clip.endUs} disabled={blocked} change={value => { const next = validateClip({ ...clip, endUs: value }, duration); changeClip(next); interact({ kind: 'end', phase: 'keyboard', timeUs: next.endUs }); }} error={setError} />
         <TimeField label="精确定位" value={position} disabled={blocked || !compatible || !previewAvailable} change={exactSeek} error={setError} /></div>
-        <span className="timeline-tip">拖动两端选择片段 · 白线定位画面</span></div>
+        <span className="timeline-tip">同一时间轴上拖动各组选区 · 重叠时按编号切换</span></div>
     </section>
     {!outputOpen && (busy || notice || error) && <div className="editor-status" aria-live="polite">
       {busy && <p>{busy} <button onClick={() => void cancel()}>取消处理</button></p>}
       {notice && <p className="hint">{notice}</p>}{error && <p role="alert" className="error">{error}</p>}
     </div>}
-    <dialog ref={draftDialog} className="draft-dialog" aria-labelledby="draft-title" onCancel={e => { if (busy) e.preventDefault(); else setOutputOpen(false); }} onClose={() => { if (!draftDialog.current?.open) setOutputOpen(false); draftDialog.current?.querySelector('video')?.pause(); }}>
-      <div className="dialog-heading"><h2 id="draft-title">输出预览</h2><div className="button-row"><button data-testid="save-motion" className="primary-button" disabled={blocked || !savingReady || !draft} onClick={() => void saveMotion()}>保存实况照片</button><button aria-label="关闭输出预览" disabled={blocked} onClick={() => setOutputOpen(false)}>关闭</button></div></div>
-      {busy && <div className="save-progress" aria-live="polite"><span data-testid="export-status" role="status">{busy}</span><button data-testid="cancel-export" onClick={() => void cancel()}>取消处理</button></div>}
-      {error && <div className="export-failure" role="alert"><strong>本次操作未完成</strong><p>{error}</p><p>{copyMode ? '请关闭此窗口，按以上原因检查素材或音轨选择后重试。跟随原片预设不会静默丢轨。' : '请关闭此窗口，按上述原因调整音轨、降混等设置后重试。软件不会静默丢轨。'}</p></div>}
-      {notice && !saved && <p className="hint" role="status">{notice}</p>}
-      {!saved && <p className="hint" data-testid="export-save-hint">尚未收到保存成功确认。生成预览后点击“保存实况照片”，会弹出保存位置对话框；预览不会自动存成成品。</p>}
-      {draft && <>{inspection?.id === draft.analysisId && inspection.actual && <p className="draft-range" data-testid="preview-actual-range">请求 {formatTime(inspection.requested.startUs)} — {formatTime(inspection.requested.endUs)}<br />实际 {formatTime(inspection.actual.startUs)} — {formatTime(inspection.actual.endUs)}</p>}
-        <div className="draft-comparison"><div><h3>视频</h3><video data-testid="output-video" controls playsInline src={draft.videoUrl} preload="metadata" /></div>
-        <div><h3>照片封面</h3><img data-testid="output-cover" src={draft.coverUrl} alt="处理后的照片封面" /></div></div>
-        <p className="hint">{draft.width} × {draft.height} · {formatTime(draft.durationUs)} · {draft.coverTimestampUs === -1 ? '独立封面，无对应视频帧' : `封面对应 ${formatTime(draft.coverTimestampUs)}`}</p>
-        <p data-testid="output-proof" className="draft-proof">{draft.proof.kind === 'copy' ? '视频原画：压缩包与时间戳对照、完整解码已通过，视频没有重新编码。JPEG 封面另行编码。' : draft.proof.sourceMatched ? '原画质预设：尺寸/帧时序跟随原片，高保真编码，非严格无损。输出已完整解码检查。' : '精确模式：视频已重新编码，输出配置与完整解码已检查。'}</p>
-        {draft.proof.kind === 'encode' && <p className="hint" data-testid="output-color-compatibility">视频与封面统一采用 sRGB 色彩处理；目标设备播放效果仍需核对。</p>}
-        {draft.proof.kind === 'encode' && draft.proof.sourceMatched && <p className="hint" data-testid="source-audio-parameters">音频：{draft.proof.audioCodec ?? '无音轨'} · {draft.proof.audioSampleRate ?? '—'} Hz · {draft.proof.audioChannels ?? 0} 声道</p>}
-        {draft.proof.kind === 'encode' && draft.proof.sourceMatched && draft.proof.audioCodec === 'aac' && <p className="hint" data-testid="source-audio-compatibility">音频采用 AAC-LC，提高相册播放兼容性；原采样率和声道数保留，非无损音频。目标设备仍需实际验证。</p>}
-        {draft.proof.kind === 'copy' && draft.proof.audioTailUs > 0 && <p className="warning" data-testid="audio-tail">完整音频包比视频尾部延长 {(draft.proof.audioTailUs / 1000).toFixed(3)} ms。</p>}
-        <details className="draft-notes"><summary>处理说明</summary>{draft.warnings.map((warning, i) => <p className="hint" key={i}>{warning}</p>)}</details>
-        {saved && <div data-testid="save-result" className="saved-result" role="status"><p>已保存 {saved.name}</p><p>{(saved.size / 1048576).toFixed(2)} MiB · 单个 JPG 实况照片</p>{saved.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</div>}
-        <p className="hint">预览不会自动保存。确认后点击“保存实况照片”，请选择新文件名；已有文件不会被覆盖。</p></>}
+    <dialog ref={draftDialog} className="draft-dialog export-dialog" aria-labelledby="export-title"
+      onCancel={e => { e.preventDefault(); closeExport(); }}
+      onClose={() => { if (outputOpen && !draftDialog.current?.open) closeExport(); }}>
+      <header className="export-header"><div><span className="eyebrow">MOTION PHOTO</span><h2 id="export-title">导出实况照片</h2><p title={asset.name}>{asset.name}</p></div>
+        <button className="close-export" aria-label="关闭导出" disabled={blocked} onClick={closeExport}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6L18 18M18 6L6 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg></button></header>
+      <div className="export-body">
+        <section className="export-content">
+          <div className="export-scope" role="group" aria-label="导出范围">
+            <button aria-pressed={exportScope === 'current'} disabled={blocked} onClick={() => { pause(false); setExportScope('current'); setBatchResult(null); }}>当前片段</button>
+            <button aria-pressed={exportScope === 'all'} disabled={blocked} onClick={() => { pause(false); setExportScope('all'); setBatchResult(null); }}>全部片段（{clips.length}）</button>
+          </div>
+          {batchResult ? <section className="export-results" data-testid="batch-result" aria-live="polite">
+            <h3>{batchResult.stopped ? '导出已停止' : batchResult.canceled ? '已取消导出' : batchResult.results.some(item => item.status === 'failed') ? '部分导出完成' : '导出完成'}</h3>
+            <div className="result-counts"><span>已保存 <b>{batchResult.saved.length}</b></span><span>失败 <b>{batchResult.results.filter(item => item.status === 'failed').length}</b></span><span>未完成 <b>{batchResult.results.filter(item => item.status === 'skipped' || item.status === 'cancelled').length}</b></span></div>
+            {batchResult.stopReason && <p className="error">{batchResult.stopReason}</p>}
+            <ul className="export-result-list">{batchResult.results.map(item => <li key={item.clipId} data-status={item.status}><button className="export-result-select" data-preview-select aria-label={`预览片段 ${item.number}`} aria-pressed={exportPreviewClip.id === item.clipId} disabled={blocked} onClick={() => selectExportPreview(item.clipId)}>
+              <span className="result-icon" aria-hidden="true">{item.saved ? '✓' : item.status === 'failed' ? '!' : '—'}</span>
+              <div><strong>{item.saved?.name ?? `片段 ${String(item.number).padStart(2, '0')}`}</strong>
+                {!item.saved && <p>{item.error?.message ?? (item.status === 'cancelled' ? '已取消' : '未执行')}</p>}
+              </div></button></li>)}</ul>
+          </section> : <div className="export-queue">
+            <div className="export-list-heading"><h3>{exportClips.length} 个实况照片</h3><span>每段独立保存</span></div>
+            <ol>{exportClips.map(item => <li key={item.id}><button className="export-preview-select" data-preview-select data-clip-id={item.id} aria-pressed={exportPreviewClip.id === item.id} aria-label={`预览片段 ${item.number}`} disabled={blocked} onClick={() => selectExportPreview(item.id)}><span className="export-clip-number">{String(item.number).padStart(2, '0')}</span>
+              <div className="export-clip-info"><strong>片段 {String(item.number).padStart(2, '0')}</strong><span>{formatTime(item.selection.startUs)} — {formatTime(item.selection.endUs)}</span></div>
+              <div className="export-clip-meta"><strong>{((item.selection.endUs - item.selection.startUs) / 1e6).toFixed(2)} 秒</strong><span>{item.cover?.kind === 'custom' ? '自定义封面' : item.cover ? '已选封面' : '自动封面'}</span></div>
+            </button></li>)}</ol>
+          </div>}
+          <section className="export-live-preview" aria-label="选段预览" data-testid="export-live-preview" data-clip-id={exportPreviewClip.id}>
+            <div className="export-live-heading"><h3>片段 {String(exportPreviewClip.number).padStart(2, '0')}</h3><span>片段预览</span></div>
+            <div className="export-live-media">
+              <CropStage testId="export-preview-stage" width={exportPixels.width} height={exportPixels.height} crop={fullCrop} locked disabled showOverlay={false} onChange={() => {}} onEdit={() => {}}>
+                <div className="export-source-crop" style={{ width: `${100 / exportCrop.width}%`, height: `${100 / exportCrop.height}%`, left: `${-exportCrop.x / exportCrop.width * 100}%`, top: `${-exportCrop.y / exportCrop.height * 100}%` }}>
+                  {outputOpen && <PreviewSurface key={asset.id} ref={surface} controller={controller} enabled={previewAvailable && compatible} />}
+                </div>
+                {(!frame || !previewAvailable) && <div className="preview-buffering" role="status">{audioChoicePending ? '请选择音轨或关闭声音' : nativePreparing ? '正在准备预览…' : '正在读取画面…'}</div>}
+              </CropStage>
+              <div className="export-live-cover"><h4>封面</h4>
+                <div className="export-cover-image" style={{ aspectRatio: `${exportPixels.width} / ${exportPixels.height}`, width: `min(100%, ${154 * exportPixels.width / exportPixels.height}px)`, background: exportPreviewClip.background }}>
+                  {exportCoverUrl ? <img data-testid="export-cover-preview" src={exportCoverUrl} alt="所选片段封面"
+                    style={previewCover?.kind === 'custom' ? { width: '100%', height: '100%', objectFit: exportPreviewClip.coverFit }
+                    : { position: 'absolute', width: `${100 / exportCrop.width}%`, height: `${100 / exportCrop.height}%`, maxWidth: 'none', left: `${-exportCrop.x / exportCrop.width * 100}%`, top: `${-exportCrop.y / exportCrop.height * 100}%` }} /> : <span>读取中</span>}
+                </div><span>{previewCover?.kind === 'custom' ? '自定义封面' : previewCover ? '已选封面' : '自动首帧'}</span>
+              </div>
+            </div>
+            <div className="export-live-transport">
+              <button data-testid="export-play" data-playback-control title="空格：播放 / 暂停" disabled={blocked || !previewAvailable || !compatible || !frame} onClick={togglePlayback}>{playing ? '暂停' : '播放'}</button>
+              <input type="range" aria-label="片段预览进度" min={exportPreviewClip.selection.startUs} max={exportPreviewClip.selection.endUs} step={1000}
+                value={Math.max(exportPreviewClip.selection.startUs, Math.min(exportPreviewClip.selection.endUs, position))} disabled={blocked || !previewAvailable}
+                onChange={event => seekExportPreview(Number(event.target.value))} />
+              <output data-testid="export-preview-time">{formatTime(Math.max(0, position - exportPreviewClip.selection.startUs))} / {formatTime(exportPreviewClip.selection.endUs - exportPreviewClip.selection.startUs)}</output>
+            </div>
+          </section>
+        </section>
+        <aside className="export-settings">{outputSettings}</aside>
+      </div>
+      <footer className="export-footer">
+        {busy && <div className="export-progress" aria-live="polite"><progress aria-label="导出进度" /><span data-testid="export-status" role="status">{busy}</span><button data-testid="cancel-export" onClick={() => void cancel()}>取消处理</button></div>}
+        {error && <div className="export-failure" role="alert"><strong>未能完成导出</strong><p>{error}</p></div>}
+        {notice && !busy && !batchResult && <p className="hint" role="status">{notice}</p>}
+        <div className="export-footer-actions"><span className="hint">JPG 实况照片 · 同名自动编号，不覆盖</span><div className="button-row">
+          <button disabled={blocked} onClick={closeExport}>{batchResult ? '完成' : '返回编辑'}</button>
+          <button data-testid="confirm-export-all" className="primary-button" disabled={blocked || !savingReady || !compatible || !chosenAudio} onClick={() => void exportAll()}>{batchResult ? '再次导出' : `选择文件夹并导出 ${exportClips.length} 张`}</button>
+        </div></div>
+      </footer>
     </dialog>
   </section>;
 }

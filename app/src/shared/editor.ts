@@ -3,6 +3,29 @@ export type CropRect = { x: number; y: number; width: number; height: number };
 export type PixelCrop = CropRect;
 export type ExportSettings = { fps: number | null; resolution: 'original' | 720 | 1080 | 1440 | 2160; crf: number };
 export type ClipSelection = { startUs: number; endUs: number };
+// One exportable segment of a single source video. Identity (id/revision) is stable across
+// edits; revision bumps whenever the selection/cover/crop changes so stale analyses and
+// drafts can never publish. Covers live in the main process and are referenced by clipId.
+export type ClipModel = {
+  id: string; number: number; revision: number; selection: ClipSelection;
+  crop: CropRect; cropLocked: boolean; coverFit: 'cover' | 'contain'; background: string;
+};
+export const FULL_CROP: CropRect = Object.freeze({ x: 0, y: 0, width: 1, height: 1 });
+export const MAX_CLIPS = 100;
+export function createClip(id: string, selection: ClipSelection, durationUs: number, number = 1): ClipModel {
+  return { id, number, revision: 0, selection: validateClip(selection, durationUs), crop: { ...FULL_CROP }, cropLocked: true, coverFit: 'cover', background: '#000000' };
+}
+export function editClip(clip: ClipModel, change: Partial<Pick<ClipModel, 'selection' | 'crop' | 'cropLocked' | 'coverFit' | 'background'>>): ClipModel {
+  return { ...clip, ...change, revision: clip.revision + 1 };
+}
+// Adding a clip at the playhead: three seconds, shortened near EOF; at EOF use the last up-to-3s window.
+// Clips may overlap freely.
+export function clipSelectionAt(positionUs: number, durationUs: number): ClipSelection {
+  if (!Number.isSafeInteger(positionUs) || positionUs < 0 || positionUs > durationUs || durationUs <= 0) throw new Error('Invalid clip position');
+  const startUs = positionUs === durationUs ? Math.max(0, durationUs - 3_000_000) : positionUs;
+  const endUs = Math.min(durationUs, startUs + 3_000_000);
+  return validateClip({ startUs, endUs }, durationUs);
+}
 
 export function parseRational(value: string | undefined): Rational | null {
   const match = /^(\d+)\/(\d+)$/.exec(value ?? '');

@@ -8,7 +8,7 @@ function environment(userData:string):Record<string,string>{
   for(const key of Object.keys(env))if(key.toLowerCase()==='path'||['ELECTRON_RUN_AS_NODE','ELECTRON_RENDERER_URL','FFMPEG_PATH','FFPROBE_PATH'].includes(key))delete env[key];
   env.PATH=`${env.SystemRoot??'C:\\Windows'}\\System32`;env.MOTION_USER_DATA_DIR=userData;return env;
 }
-test('native desktop switches audio, replaces playing source, reports helper death and recovers by reimport',async()=>{
+test('native desktop switches audio, replaces playing source, reports helper death and recovers by retry and reimport',async()=>{
   test.setTimeout(180000);
   const root=resolve(`../artifacts/native-preview/lifecycle-${Date.now()}`);await mkdir(root,{recursive:true});
   const first=join(root,'audio-tracks.mp4'),second=join(root,'replacement.mp4'),userData=join(root,'user-data');
@@ -32,9 +32,13 @@ test('native desktop switches audio, replaces playing source, reports helper dea
       process.getBuiltinModule('node:module').syncBuiltinESMExports();
     },[first,second,first]);
     await page.getByTestId('open-video').click();const canvas=page.getByTestId('native-preview'),play=page.getByTestId('play-video');
-    await expect(canvas).toHaveAttribute('width','320',{timeout:60000});await expect(play).toBeEnabled();
-    const beforeEditing=await app.evaluate(()=>(globalThis as any).__lifecycleSpawns.length);
+    await expect(play).toBeDisabled();
+    await expect(page.getByLabel('所保留的音轨',{exact:true})).toHaveValue('');
     await page.getByLabel('所保留的音轨',{exact:true}).selectOption('2');
+    await expect(canvas).toHaveAttribute('width','320',{timeout:60000});await expect(play).toBeEnabled();
+    const initialHelpers=await app.evaluate(()=>(globalThis as any).__lifecycleSpawns.filter((row:any)=>row.executable.endsWith('motion-preview.exe')));
+    expect(initialHelpers.filter((row:any)=>!row.closed)).toHaveLength(1);
+    const beforeEditing=await app.evaluate(()=>(globalThis as any).__lifecycleSpawns.length);
     await play.click();await expect(play).toHaveText('暂停');
     await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(1000000);
     await page.getByLabel('所保留的音轨',{exact:true}).selectOption('1');await expect(play).toHaveText('播放选段');
@@ -47,7 +51,7 @@ test('native desktop switches audio, replaces playing source, reports helper dea
     await expect(canvas).toHaveAttribute('width','480',{timeout:60000});await expect(play).toBeEnabled();
     const replacement=await app.evaluate(()=>(globalThis as any).__lifecycleSpawns);
     const helpers=replacement.filter((row:{executable:string})=>row.executable.endsWith('motion-preview.exe'));
-    expect(helpers).toHaveLength(2);expect(helpers[0].closed).toBe(true);expect(helpers[1].closed).toBe(false);
+    expect(helpers).toHaveLength(initialHelpers.length+1);expect(helpers.slice(0,-1).every((row:any)=>row.closed)).toBe(true);expect(helpers.at(-1).closed).toBe(false);
     await play.click();await expect(play).toHaveText('暂停');
     // Kill only the exact, still-live helper recorded by this isolated app's spawn hook.
     await app.evaluate(()=>{
@@ -56,15 +60,21 @@ test('native desktop switches audio, replaces playing source, reports helper dea
     });
     await expect(play).toBeDisabled();await expect(page.getByTestId('capture-cover')).toBeDisabled();
     await expect(page.getByRole('alert')).toContainText(/原生|预览/);
-    await page.getByRole('button',{name:'准备预览',exact:true}).click();await expect(page.getByRole('alert')).toBeVisible();
-    await expect(play).toBeDisabled();expect(await app.evaluate(()=>(globalThis as any).__lifecycleSpawns.length)).toBe(replacement.length);
+    await page.getByRole('button',{name:'准备预览',exact:true}).click();
+    await expect(canvas).toHaveAttribute('data-frame-id',/\d+/,{timeout:60000});await expect(play).toBeEnabled();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    const retried=await app.evaluate(()=>(globalThis as any).__lifecycleSpawns.filter((row:any)=>row.executable.endsWith('motion-preview.exe')));
+    expect(retried).toHaveLength(helpers.length+1);expect(retried.slice(0,-1).every((row:any)=>row.closed)).toBe(true);
+    expect(retried.at(-1).closed).toBe(false);
     await page.getByTestId('open-video').click();await expect(page.getByTestId('asset-name')).toHaveText('audio-tracks.mp4');
+    await expect(play).toBeDisabled();await page.getByLabel('所保留的音轨',{exact:true}).selectOption('2');
     await expect(canvas).toHaveAttribute('width','320',{timeout:60000});await expect(play).toBeEnabled();
     await expect(page.getByRole('alert')).toHaveCount(0);
     await page.getByRole('button',{name:'关闭素材',exact:true}).click();await expect(page.getByTestId('editor')).toHaveCount(0);
     expect(await readdir(join(userData,'media-sessions'))).toEqual([]);expect(await Promise.all([sha256(first),sha256(second)])).toEqual(hashes);expect(errors).toEqual([]);
     const spawns=await app.evaluate(()=>(globalThis as any).__lifecycleSpawns);
-    expect(spawns.filter((row:{executable:string})=>row.executable.endsWith('motion-preview.exe'))).toHaveLength(3);
+    const totalHelpers=spawns.filter((row:{executable:string})=>row.executable.endsWith('motion-preview.exe')).length;
+    expect(totalHelpers-retried.length).toBe(initialHelpers.length);
     expect(spawns.every((row:{closed:boolean})=>row.closed)).toBe(true);
     await writeFile(join(root,'report.json'),JSON.stringify({spawns,errors,sourceUnchanged:true,reimportRecovered:true},null,2));
   }catch(error){
@@ -85,12 +95,22 @@ test('minimized native playback keeps Canvas acknowledgments flowing without bac
     app=await electron.launch({...(process.env.MOTION_PACKAGED_EXE?{executablePath:resolve(process.env.MOTION_PACKAGED_EXE),args:[]}:{args:[resolve('.')]}),env:environment(userData),timeout:60000});
     const page=await app.firstWindow();await app.context().setOffline(true);await expect(page.getByTestId('open-video')).toBeEnabled({timeout:60000});
     expect(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.webContents.backgroundThrottling)).toBe(false);
+    await app.evaluate(({BrowserWindow,app})=>{
+      const window=BrowserWindow.getAllWindows()[0]!,events:unknown[]=[];(globalThis as any).__backgroundWindowEvents=events;
+      const record=(event:string)=>events.push({event,wall:Date.now(),minimized:window.isMinimized(),focused:window.isFocused()});
+      for(const event of ['minimize','restore','show','focus','blur','ready-to-show'])window.on(event as any,()=>record(event));
+      for(const method of ['restore','show','focus'] as const){const original=window[method];window[method]=()=>{record(`call:${method}`);original.call(window);};}
+      app.on('second-instance',()=>record('second-instance'));record('observe');
+    });
     await app.evaluate(({dialog},file)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[file]});},source);
     await page.getByTestId('open-video').click();const canvas=page.getByTestId('native-preview');
     await expect(canvas).toHaveAttribute('data-time-us','0',{timeout:60000});await expect(page.locator('.thumbnails img')).toHaveCount(8,{timeout:60000});
     await page.evaluate(()=>{
       const canvas=document.querySelector<HTMLCanvasElement>('[data-testid="native-preview"]')!,rows:any[]=[];(window as any).__backgroundPaints=rows;
-      new MutationObserver(()=>{rows.push({wall:Date.now(),pts:canvas.dataset.pts,timeUs:Number(canvas.dataset.timeUs),visibility:document.visibilityState});}).observe(canvas,{attributes:true,attributeFilter:['data-frame-id']});
+      new MutationObserver(()=>{
+        let hash=2166136261;for(const byte of canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height).data)hash=Math.imul(hash^byte,16777619)>>>0;
+        rows.push({wall:Date.now(),frameId:canvas.dataset.frameId,hash,pts:canvas.dataset.pts,timeUs:Number(canvas.dataset.timeUs),visibility:document.visibilityState});
+      }).observe(canvas,{attributes:true,attributeFilter:['data-frame-id']});
     });
     await page.getByTestId('play-video').click();await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(1000000);
     await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.minimize());
@@ -98,14 +118,17 @@ test('minimized native playback keeps Canvas acknowledgments flowing without bac
     const began=Date.now();await page.waitForTimeout(3000); // A defined observation interval while minimized.
     expect(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.isMinimized())).toBe(true);
     const rows=await page.evaluate(time=>(window as any).__backgroundPaints.filter((row:any)=>row.wall>=time),began);
-    expect(new Set(rows.map((row:any)=>row.pts)).size).toBeGreaterThan(20);
+    expect(new Set(rows.map((row:any)=>row.frameId)).size).toBeGreaterThan(20);
+    expect(new Set(rows.map((row:any)=>row.hash)).size).toBeGreaterThan(20);
     expect(rows.at(-1).timeUs-rows[0].timeUs).toBeGreaterThan(2000000);
     await app.evaluate(({BrowserWindow})=>{const window=BrowserWindow.getAllWindows()[0]!;window.restore();window.show();window.focus();});
     await expect(page.getByTestId('play-video')).toHaveText('暂停');await page.getByTestId('play-video').click();
     await expect(page.getByTestId('play-video')).toHaveText('播放选段');
     await page.getByRole('button',{name:'关闭素材',exact:true}).click();await expect(page.getByTestId('editor')).toHaveCount(0);
     expect(await readdir(join(userData,'media-sessions'))).toEqual([]);expect(await sha256(source)).toBe(before);
-    await writeFile(join(root,'report.json'),JSON.stringify({rows,sourceUnchanged:true,minimizedIntervalMs:3000},null,2),{flag:'wx'});
-  }catch(error){await writeFile(join(root,'failure.json'),JSON.stringify({error:String(error)},null,2),{flag:'wx'});throw error;}
+    const windowEvents=await app.evaluate(()=>(globalThis as any).__backgroundWindowEvents);
+    await writeFile(join(root,'report.json'),JSON.stringify({rows,windowEvents,sourceUnchanged:true,minimizedIntervalMs:3000},null,2),{flag:'wx'});
+  }catch(error){const windowEvents=await app?.evaluate(()=>(globalThis as any).__backgroundWindowEvents).catch(()=>null);
+    await writeFile(join(root,'failure.json'),JSON.stringify({error:String(error),windowEvents},null,2),{flag:'wx'});throw error;}
   finally{await app?.close();}
 });

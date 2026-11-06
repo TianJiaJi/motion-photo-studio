@@ -8,7 +8,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows::Win32::{
     Media::Audio::*,
@@ -22,6 +22,30 @@ pub struct Options {
     pub stream: u32,
     pub offset_hns: i64,
 }
+// The startup window is not proof of whole-track continuity. Verify each decoded
+// block during playback; only the first block may establish an arbitrary leading delay.
+fn next_sample_end(previous: Option<i64>, stamp: i64, count: u32, rate: u32) -> AppResult<i64> {
+    if rate == 0 || count == 0 {
+        return Err("invalid audio sample clock".into());
+    }
+    if let Some(end) = previous {
+        let delta = i128::from(stamp) - i128::from(end);
+        let tolerance = i128::from(10_000_000 / rate) + 2;
+        if delta.abs() > tolerance {
+            return Err("audio timeline discontinuity; compatibility preparation required".into());
+        }
+    }
+    stamp
+        .checked_add(i64::from(count) * 10_000_000 / i64::from(rate))
+        .ok_or_else(|| "audio sample clock overflow".into())
+}
+
+// Shared-mode padding can empty before the device clock reaches the final sample
+// (notably with resampling). Queue consumption alone is not audible completion.
+fn clock_drained(padding: u32, submitted: u64, rate: u32, elapsed_hns: u128) -> bool {
+    padding == 0 && elapsed_hns * u128::from(rate) >= u128::from(submitted) * 10_000_000
+}
+
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
@@ -199,9 +223,11 @@ fn play(
         let mut pending = Vec::<u8>::new();
         let mut offset = 0usize;
         let mut pending_time = 0i64;
+        let mut previous_sample_end = None;
         let mut started = false;
         let mut eof = false;
         let mut submitted = 0u64;
+        let mut drain_since: Option<Instant> = None;
         while !shared.stop.load(Ordering::Acquire) {
             let padding = stop_client.0.GetCurrentPadding()?;
             if padding > capacity {
@@ -217,6 +243,8 @@ fn play(
                     if offset >= pending.len() && !eof {
                         match source.sample()? {
                             Some((sample, time, count)) => {
+                                previous_sample_end =
+                                    Some(next_sample_end(previous_sample_end, time, count, rate)?);
                                 pending = media::sample_bytes(&sample)?;
                                 if pending.len() != count as usize * 8 {
                                     return Err("misaligned float stereo sample".into());
@@ -285,10 +313,11 @@ fn play(
                 shared.running.store(true, Ordering::Release);
                 ready.send(Ok(()))?;
             }
+            let mut elapsed = 0u128;
             if started {
                 let mut ticks = 0;
                 clock.GetPosition(&mut ticks, None)?;
-                let elapsed = u128::from(ticks) * 10_000_000 / u128::from(frequency);
+                elapsed = u128::from(ticks) * 10_000_000 / u128::from(frequency);
                 let mut at = origin
                     .checked_add(i64::try_from(elapsed)?)
                     .ok_or("audio clock overflow")?;
@@ -298,7 +327,11 @@ fn play(
                     )?);
                 }
                 shared.time_hns.store(at, Ordering::Release);
-                if padding == 0 && !eof && submitted > u64::from(capacity) {
+                if padding == 0
+                    && !eof
+                    && submitted > u64::from(capacity)
+                    && max_frames.is_none_or(|maximum| submitted < maximum)
+                {
                     shared.underruns.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -306,10 +339,39 @@ fn play(
                 || eof && max_frames.is_none())
                 && stop_client.0.GetCurrentPadding()? == 0
             {
-                break;
+                if clock_drained(0, submitted, rate, elapsed) {
+                    break;
+                }
+                let since = drain_since.get_or_insert_with(Instant::now);
+                if since.elapsed() > Duration::from_secs(5) {
+                    return Err("audio device clock stalled before final sample drained".into());
+                }
             }
             thread::sleep(Duration::from_millis(4));
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clock_drained, next_sample_end};
+    #[test]
+    fn empty_queue_is_not_completion_until_the_device_clock_drains() {
+        assert!(!clock_drained(0, 64000, 32000, 19_761_562));
+        assert!(clock_drained(0, 64000, 32000, 20_000_000));
+        assert!(!clock_drained(1, 64000, 32000, 20_000_000));
+        assert!(!clock_drained(0, 1, 48000, 208));
+        assert!(clock_drained(0, 1, 48000, 209));
+    }
+    #[test]
+    fn accepts_leading_delay_and_sample_rounding_but_rejects_late_gaps() -> crate::AppResult<()> {
+        let end = next_sample_end(None, 4_000_000, 1024, 48000)?;
+        assert!(next_sample_end(Some(end), end + 1, 1024, 48000).is_ok());
+        assert!(next_sample_end(Some(end), end + 100_000, 1024, 48000).is_err());
+        assert!(next_sample_end(Some(end), end - 100_000, 1024, 48000).is_err());
+        assert!(next_sample_end(None, i64::MAX, 1024, 48000).is_err());
+        assert!(next_sample_end(None, 0, 0, 48000).is_err());
         Ok(())
     }
 }

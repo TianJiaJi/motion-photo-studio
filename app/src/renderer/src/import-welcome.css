@@ -1,0 +1,74 @@
+/* Import landing page only: no overrides to the editor or export workspace. */
+.import-welcome { overflow-x: clip; width: min(1040px, 100%); min-height: 100%; margin: 0 auto; padding: clamp(20px, 4vh, 44px) 36px 18px; display: flex; flex-direction: column; justify-content: center; }
+.import-hero { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 48px; flex: 1; min-height: 360px; }
+.import-copy { position: relative; z-index: 1; padding-left: 16px; }
+.import-eyebrow { display: block; font: 10px/1.5 "Segoe UI", sans-serif; letter-spacing: 3px; color: #8aaba7; margin-bottom: 24px; }
+.import-copy h2 { font-size: clamp(32px, 4vw, 48px); line-height: 1.3; letter-spacing: 1px; font-weight: 600; color: #e8e9e8; }
+.import-copy h2 > span { color: #9fd2c9; }
+.import-intro { font-size: 13px; color: #9eaaa9; line-height: 1.9; margin-top: 20px; }
+.import-action { margin-top: 28px; }
+.import-action button { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-width: 196px; min-height: 46px; padding: 12px 22px; font-size: 13px; border-radius: 8px; box-shadow: 0 4px 20px #80c8bf0c; }
+.import-action button:disabled { opacity: .65; }
+.import-formats { margin-top: 12px; font-size: 10px; letter-spacing: .3px; color: #797f84; }
+.import-feedback { min-height: 38px; padding-top: 15px; color: #afc9c4; font-size: 11px; }
+.import-feedback p { display: flex; align-items: center; gap: 8px; line-height: 1.7; }
+.import-spinner { flex: 0 0 12px; width: 12px; height: 12px; border: 1.5px solid #475e5b; border-top-color: #a5d6cc; border-radius: 50%; animation: import-spin .9s linear infinite; }
+@keyframes import-spin { to { transform: rotate(360deg); } }
+.import-error { max-width: 420px; margin-top: 8px; overflow-wrap: anywhere; }
+.import-error strong { display: block; font-size: 12px; margin-bottom: 4px; }
+.import-error p { font-size: 11px; }
+.import-art { height: 388px; position: relative; display: grid; place-items: center; isolation: isolate; pointer-events: none; }
+.import-art::before { content: ''; position: absolute; inset: -10% -12%; background: radial-gradient(ellipse, #557f7024, transparent 65%); z-index: -2; }
+.import-orbit { position: absolute; width: 350px; height: 350px; border: 1px solid #88b4a310; border-radius: 50%; transform: rotate(-25deg) scaleX(1.15); }
+.import-photo-back { position: absolute; width: 238px; height: 306px; border: 1px solid #404e4b; border-radius: 13px; background: linear-gradient(135deg, #293b38, #1c2426); transform: translate(24px, -5px) rotate(9deg); }
+.import-photo { position: relative; width: 246px; padding: 8px 8px 0; border: 1px solid #57645e; border-radius: 13px; background: #262f2d; transform: rotate(-6deg); box-shadow: 0 24px 52px #0006; }
+.import-photo-scene { height: 286px; border-radius: 7px; overflow: hidden; position: relative; background: #3e6465; }
+.import-photo-scene > svg { display: block; width: 100%; height: 100%; }
+.import-live-mark { position: absolute; left: 12px; top: 12px; display: flex; gap: 5px; align-items: center; padding: 4px 7px; border: 1px solid #dae5d82b; border-radius: 5px; background: #1735377a; color: #e0e8d9; font: 9px/1 "Segoe UI", sans-serif; letter-spacing: 1px; }
+.import-live-mark > span { width: 7px; height: 7px; border: 1px solid #d5e1d5; border-radius: 50%; box-shadow: 0 0 0 2px #d5e1d530; }
+.import-photo-motion { position: absolute; bottom: 13px; right: 14px; height: 18px; display: flex; align-items: center; gap: 3px; }
+.import-photo-motion span { width: 2px; height: 6px; border-radius: 2px; background: #d6e4d9b3; }
+.import-photo-motion span:nth-child(2n) { height: 12px; }
+.import-photo-motion span:nth-child(3n) { height: 17px; }
+.import-photo-caption { display: flex; justify-content: space-between; align-items: center; padding: 12px 5px; color: #c4d1c8; font-size: 9px; letter-spacing: .7px; }
+.import-photo-caption > span:last-child { font: 10px Consolas, monospace; color: #91a69d; }
+.import-art-note { position: absolute; bottom: 0; right: 42px; font-size: 10px; letter-spacing: 3px; color: #7c9790; }
+.import-steps { display: grid; grid-template-columns: repeat(3, 1fr); list-style: none; margin: 30px 0 0; padding: 22px 0; border-top: 1px solid #313b374d; border-bottom: 1px solid #313b374d; }
+.import-steps li { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 3px 18px; }
+.import-steps li + li { border-left: 1px solid #313b3766; }
+.import-steps li > span { font: 12px Consolas, monospace; color: #71978d; }
+.import-steps strong { font-size: 12px; color: #bdc7c3; font-weight: 500; }
+.import-steps p { font-size: 10px; color: #777f7f; margin-top: 6px; }
+.import-privacy { display: flex; gap: 7px; align-items: center; justify-content: center; color: #7f8b88; font-size: 10px; margin-top: 20px; }
+@media (max-height: 720px) {
+  .import-welcome { padding-top: 16px; padding-bottom: 12px; }
+  .import-hero { min-height: 320px; }
+  .import-eyebrow { margin-bottom: 16px; }
+  .import-copy h2 { font-size: 36px; }
+  .import-intro { margin-top: 14px; }
+  .import-action { margin-top: 20px; }
+  .import-art { height: 320px; }
+  .import-photo { width: 214px; }
+  .import-photo-scene { height: 238px; }
+  .import-photo-back { width: 208px; height: 266px; }
+  .import-orbit { width: 280px; height: 280px; }
+  .import-art-note { bottom: -6px; }
+  .import-steps { margin-top: 20px; padding-block: 16px; }
+  .import-privacy { margin-top: 15px; }
+}
+@media (max-width: 850px) {
+  .import-welcome { padding-inline: 20px; }
+  .import-hero { gap: 14px; }
+  .import-copy { padding-left: 4px; }
+  .import-copy h2 { font-size: 34px; }
+  .import-art-note { right: 12px; }
+  .import-steps li { padding-inline: 8px; gap: 10px; }
+}
+@media (max-width: 650px) {
+  .import-hero { grid-template-columns: 1fr; }
+  .import-copy { padding: 20px 8px; }
+  .import-art { display: none; }
+  .import-steps li { align-items: flex-start; gap: 6px; }
+  .import-steps strong { font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) { .import-spinner { animation: none; } }

@@ -21,6 +21,15 @@ pub const VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 pub const AUDIO: u32 = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
 const ALL: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
 
+/// Selects which presented frame a time-based locate returns at the target boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Boundary {
+    /// First frame at or after the target.
+    After,
+    /// Last frame strictly before the target.
+    Before,
+}
+
 pub struct Runtime;
 impl Runtime {
     pub fn new() -> AppResult<Self> {
@@ -191,6 +200,10 @@ pub struct Video {
     layout: Layout,
     cache: crate::cache::FrameCache,
     decoded_position: Option<i64>,
+    // One retained decoder sample and one proven adjacent-frame interval. This lets
+    // time-clock playback advance without seeking back through the GOP every tick.
+    last_sample: Option<(IMFSample, i64)>,
+    before_interval: Option<(Frame, i64)>,
     displayed_position: Option<i64>,
     seek_origin: i64,
     seeks: u64,
@@ -300,6 +313,8 @@ impl Video {
                 stride,
                 cache: crate::cache::FrameCache::new(crate::cache::PRIMARY_BYTES),
                 decoded_position: None,
+                last_sample: None,
+                before_interval: None,
                 displayed_position: None,
                 seek_origin: 0,
                 seeks: 0,
@@ -317,6 +332,8 @@ impl Video {
     }
     pub fn invalidate_position(&mut self) {
         self.decoded_position = None;
+        self.last_sample = None;
+        self.before_interval = None;
         self.displayed_position = None;
         self.cache.clear();
     }
@@ -342,6 +359,7 @@ impl Video {
     }
     fn sample(&mut self) -> AppResult<Option<(IMFSample, i64)>> {
         let result = self.source.sample(VIDEO)?;
+        self.last_sample = result.clone();
         if let Some((_, timestamp)) = &result {
             self.decoded_position = Some(*timestamp);
             self.decoded_samples = self.decoded_samples.saturating_add(1);
@@ -433,6 +451,7 @@ impl Video {
         self.locate(
             i64::try_from(time_us.checked_mul(10).ok_or("seek overflow")?)?,
             None,
+            None,
             cancel,
         )
     }
@@ -440,6 +459,7 @@ impl Video {
         &mut self,
         target: i64,
         seek_from: Option<i64>,
+        boundary: Option<Boundary>,
         cancel: &crate::control::Cancellation,
     ) -> AppResult<Frame> {
         cancel.check()?;
@@ -448,31 +468,74 @@ impl Video {
             return Err("invalid indexed seek origin".into());
         }
         self.seek_origin = start;
-        if let Some(frame) = self.cache.get(target, self.info.width, self.info.height) {
+        if boundary == Some(Boundary::Before)
+            && let Some((frame, next_stamp)) = &self.before_interval
+            && frame.width == self.info.width
+            && frame.height == self.info.height
+            && frame.timestamp_hns < target
+            && target <= *next_stamp
+        {
+            let frame = frame.clone();
+            return Ok(self.remember(frame));
+        }
+        // An exact cache hit is the requested frame for at-or-after targets; a strictly-before
+        // boundary must never return the frame sitting exactly at the target.
+        if boundary != Some(Boundary::Before)
+            && let Some(frame) = self.cache.get(target, self.info.width, self.info.height)
+        {
             self.displayed_position = Some(frame.timestamp_hns);
             return Ok(frame);
         }
         let nearby = self
             .decoded_position
             .is_some_and(|stamp| target > stamp && target - stamp <= 5_000_000);
+        let mut last = if nearby {
+            self.last_sample.clone()
+        } else {
+            None
+        };
         if !nearby {
             self.source.seek_hns(start)?;
             self.decoded_position = None;
+            self.last_sample = None;
+            self.before_interval = None;
             self.seeks = self.seeks.saturating_add(1);
         }
-        let mut last: Option<(IMFSample, i64)> = None;
         for _ in 0..3000 {
             cancel.check()?;
             let Some((sample, timestamp)) = self.sample()? else {
-                let (sample, timestamp) = last.ok_or("no video frame")?;
-                let frame = self.materialize(sample, timestamp)?;
-                return Ok(self.remember(frame));
+                return match boundary {
+                    // Legacy thumbnail contract: EOF falls back to the last presented frame.
+                    None => {
+                        let (sample, timestamp) = last.ok_or("no video frame")?;
+                        let frame = self.materialize(sample, timestamp)?;
+                        Ok(self.remember(frame))
+                    }
+                    // Strict at-or-after: a trailing frame below the target is not a hit.
+                    Some(Boundary::After) => Err("no video frame".into()),
+                    Some(Boundary::Before) => {
+                        let (sample, timestamp) = last.ok_or("no preceding video frame")?;
+                        let frame = self.materialize(sample, timestamp)?;
+                        Ok(self.remember(frame))
+                    }
+                };
             };
             // Decode reference frames, but never read back/copy every skipped GPU picture.
             // Only the selected presented frame crosses the native/renderer boundary.
             if timestamp >= target {
-                let frame = self.materialize(sample, timestamp)?;
-                return Ok(self.remember(frame));
+                return match boundary {
+                    Some(Boundary::Before) => {
+                        let next_stamp = timestamp;
+                        let (sample, timestamp) = last.ok_or("no preceding video frame")?;
+                        let frame = self.materialize(sample, timestamp)?;
+                        self.before_interval = Some((frame.clone(), next_stamp));
+                        Ok(self.remember(frame))
+                    }
+                    _ => {
+                        let frame = self.materialize(sample, timestamp)?;
+                        Ok(self.remember(frame))
+                    }
+                };
             }
             last = Some((sample, timestamp));
         }

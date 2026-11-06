@@ -1,0 +1,43 @@
+/* Editing workspace: one header, generous canvas, one shared timeline. */
+.app-header { height: 52px; gap: 20px; padding-inline: 16px; }
+.editor-toolbar { display: flex; flex: 1; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; }
+.editor-toolbar .asset-heading { border-left: 1px solid var(--border); padding-left: 18px; }
+.editor-toolbar .asset-heading h2 { max-width: min(28vw, 360px); font-size: 12px; }
+.editor-toolbar .asset-heading .hint { font-size: 10px; }
+.editor-toolbar .file-actions { flex-wrap: nowrap; flex-shrink: 0; gap: 6px; }
+.editor-toolbar .file-actions > button:not(.export-button) { background: transparent; color: #aaaab2; padding: 6px 8px; }
+.editor-toolbar .export-button { min-width: 102px; margin-left: 5px; }
+.app-body { padding: 10px; }
+.editor { min-height: 500px; gap: 8px; }
+.workspace { grid-template-columns: minmax(0, 1fr) 228px; min-height: 280px; }
+.editing-main { padding: 8px 10px; }
+.preview-caption { margin-bottom: 6px; font-size: 10px; flex-wrap: nowrap; }
+.preview-caption button { padding: 4px 7px; font-size: 10px; }
+.preview-caption [data-testid=displayed-frame] { color: #929298; white-space: nowrap; }
+.stage-host { min-height: 180px; border-radius: 4px; }
+.transport { margin-block: 5px; min-height: 28px; }
+.crop-controls { padding-top: 5px; }
+.editor-sidebar { scrollbar-gutter: auto; }
+.editor-sidebar .panel { padding: 12px; }
+.editor-sidebar h3 { margin-bottom: 10px; }
+.editor-sidebar .audio-panel .check { margin-top: 0; }
+.editor-sidebar .cover-preview { max-height: 150px; }
+.timeline-panel { padding: 9px 14px 10px; }
+.timeline-head { margin-bottom: 8px; }
+.clip-tabs { margin-bottom: 7px; padding-bottom: 2px; }
+.timeline-tip { display: none; }
+.editor-status { top: 38px; }
+@media (max-width: 1000px) {
+  .app-header { gap: 12px; padding-inline: 12px; }
+  .brand h1 { display: none; }
+  .editor-toolbar .asset-heading { padding-left: 12px; }
+  .workspace { grid-template-columns: minmax(0, 1fr) 208px; }
+  .preview-caption [data-testid=displayed-frame] { max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+}
+@media (max-height: 700px) {
+  .editor { min-height: 490px; }
+  .workspace { min-height: 270px; }
+  .app-header { height: 46px; }
+  .preview-caption { margin-bottom: 4px; }
+  .timeline-panel { padding-block: 7px; }
+}

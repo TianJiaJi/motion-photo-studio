@@ -4,7 +4,7 @@ import {join,resolve} from 'node:path';
 import {TempFiles} from '../../src/main/jobs/temp-files.ts';
 import {CleanupJournal} from '../../src/main/jobs/cleanup-journal.ts';
 
-test('startup recovers owned interrupted cleanup but keeps unmarked history and shows classified nonblocking records',async()=>{
+test('startup discards obsolete app caches without a banner, protects linked targets and retries after shutdown',async()=>{
   test.setTimeout(120000);
   const root=resolve(`../artifacts/native-preview/cleanup-ui-${Date.now()}`),userData=join(root,'user-data');await mkdir(userData,{recursive:true});
   const sessions=join(userData,'media-sessions'),jobs=join(userData,'jobs');await mkdir(sessions);
@@ -25,14 +25,16 @@ test('startup recovers owned interrupted cleanup but keeps unmarked history and 
     await expect(page.getByTestId('engine-state')).toHaveText('引擎就绪',{timeout:60000});await expect(page.getByTestId('open-video')).toBeEnabled();
     const response=await page.evaluate(()=>window.motion.getSnapshot());expect(response.ok).toBe(true);if(!response.ok)throw new Error(response.error.message);
     expect(response.value.startupWarnings).toEqual([]);
-    expect(response.value.cleanupIssues.map(issue=>issue.reason).sort()).toEqual(['invalid-marker','missing-marker','unsafe-path']);
-    await expect(page.getByTestId('cleanup-notice')).toContainText('3 项');await expect(page.getByTestId('cleanup-notice')).not.toHaveAttribute('open','');
+    expect(response.value.cleanupIssues.map(issue=>issue.reason)).toEqual(['unsafe-path']);
+    await expect(page.getByTestId('cleanup-notice')).toHaveCount(0);
     await page.getByRole('button',{name:'帮助与检查',exact:true}).click();await page.getByTestId('cleanup-details').locator('summary').click();
-    await expect(page.getByTestId('cleanup-details')).toContainText(history);await expect(page.getByTestId('cleanup-details')).toContainText('不能补造所有权标记');
+    await expect(page.getByTestId('cleanup-details')).not.toContainText(history);await expect(page.getByTestId('cleanup-details')).toContainText('路径异常');
     await page.screenshot({path:join(root,'classified-records.png')});
-    expect(await readFile(join(sessions,history,'original.mp4'),'utf8')).toBe('unowned historical bytes');
-    expect(await readdir(join(sessions,history))).toEqual(['original.mp4']);expect(await readFile(join(sessions,corrupt,'.owner.json'),'utf8')).toBe('broken-json');
+    expect(await readdir(sessions)).toEqual([]);
     expect(await readFile(join(target,'source.mp4'),'utf8')).toBe('source');expect(await new CleanupJournal(jobs).jobs()).toEqual([]);
     await writeFile(join(root,'report.json'),JSON.stringify(response.value.cleanupIssues,null,2));
-  }finally{await app?.close();await unlink(link);}
+    await unlink(link); // Release the deliberate obstruction; shutdown now retries stale cleanup.
+    await app.close(); app=undefined;
+    expect(await readdir(jobs)).toEqual([]);expect(await readFile(join(target,'source.mp4'),'utf8')).toBe('source');
+  }finally{await app?.close();await unlink(link).catch(()=>{});}
 });

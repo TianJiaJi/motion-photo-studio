@@ -201,13 +201,14 @@ mod tests {
     use super::*;
     fn seek(id: u64, generation: u64) -> Request {
         Request {
-            version: 1,
+            version: crate::protocol::VERSION,
             id,
             generation,
             command: Command::Locate {
                 time_hns: id.to_string(),
                 seek_hns: Some("0".into()),
                 playback: false,
+                boundary: None,
             },
         }
     }
@@ -235,7 +236,7 @@ mod tests {
     fn queue_is_bounded_and_foreground_interrupts_thumbnail() {
         let control = Control::new();
         control.push(Request {
-            version: 1,
+            version: crate::protocol::VERSION,
             id: 1,
             generation: 1,
             command: Command::Thumbnail {
@@ -250,7 +251,7 @@ mod tests {
         assert!(thumbnail.check().is_err());
         for id in 3..30 {
             control.push(Request {
-                version: 1,
+                version: crate::protocol::VERSION,
                 id,
                 generation: 1,
                 command: Command::Stats,

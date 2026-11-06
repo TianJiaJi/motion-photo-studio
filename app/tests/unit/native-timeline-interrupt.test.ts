@@ -23,7 +23,7 @@ for(const code of ['CANCELLED','NATIVE_EXIT'] as const)test(`overlapping epoch s
       },
       async shutdown(){exit(0);},
     };
-    const media={native,index:{async close(){}}} as unknown as PreparedNativeMedia;
+    const media={native,frames:{async close(){}}} as unknown as PreparedNativeMedia;
     timeline=new NativeTimeline('asset',source,media,{frame(){assert.fail('Pause must not invent a frame');},status(value){states.push(value);}});
     const first=timeline.control({assetId:'asset',epoch:1,action:'pause'});
     // Observe both requests before delivering a deterministic transport rejection.

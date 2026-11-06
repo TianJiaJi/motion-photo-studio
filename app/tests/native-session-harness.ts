@@ -5,12 +5,12 @@ import {MediaSession} from '../src/main/media/session.ts';
 import {MediaResources} from '../src/main/media/resources.ts';
 import {TempFiles} from '../src/main/jobs/temp-files.ts';
 import type {PreviewStamp} from '../src/shared/native-preview.ts';
-export async function nativeSessionHarness() {
+export async function nativeSessionHarness(options: { strict?: boolean } = {}) {
   const temp=await tempFiles(),store=new TempFiles(temp.file('sessions'));await store.initialize();
   const resources=new MediaResources(),warnings:string[]=[],frames:PreviewStamp[]=[],ackErrors:unknown[]=[];
   let manager:MediaSession,epoch=0;
   manager=new MediaSession({ffmpeg:resolve('resources/bin/ffmpeg.exe'),ffprobe:resolve('resources/bin/ffprobe.exe'),build:'fixture'},store,resources,message=>warnings.push(message),undefined,undefined,[],{
-    helper:resolve('resources/bin/motion-preview.exe'),status:()=>{},frame(frame){
+    helper:resolve('resources/bin/motion-preview.exe'),forceStrict:options.strict===true,status:()=>{},frame(frame){
       const {pixels:_pixels,...stamp}=frame;frames.push(stamp);
       queueMicrotask(()=>{try{manager.nativeAcknowledge({assetId:stamp.assetId,epoch:stamp.epoch,frameId:stamp.frameId,painted:true});}catch(error){ackErrors.push(error);}});
     },

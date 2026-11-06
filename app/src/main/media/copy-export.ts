@@ -144,7 +144,7 @@ export async function verifyCopyOutput(options: {
   const base = parseRational(out.video.timeBase)!;
   if (out.video.startPts !== '0' || BigInt(out.video.endPts) * BigInt(base.numerator) * BigInt(plan.timeBase.denominator)
     !== (BigInt(plan.endPts) - BigInt(plan.startPts)) * BigInt(plan.timeBase.numerator) * BigInt(base.denominator))
-    throw new Error('原画输出的视频时间轴或实际时长不符合已确认边界。');
+    throw new Error(`原画输出的视频时间轴或实际时长不符合已确认边界。output=${out.video.startPts}..${out.video.endPts}@${base.numerator}/${base.denominator}; source=${plan.startPts}..${plan.endPts}@${plan.timeBase.numerator}/${plan.timeBase.denominator}`);
   const video = new Digests(base, 0n);
   const audio = out.audio ? new Digests(parseRational(out.audio.timeBase)!, 0n) : null;
   if (out.audio) sampleClock(parseRational(out.audio.timeBase)!, out.audio.sampleRate);

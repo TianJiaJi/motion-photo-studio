@@ -1,25 +1,27 @@
 import { useRef } from 'react';
-import type { KeyboardEvent, PointerEvent } from 'react';
-import type { ClipSelection } from '../../shared/editor.ts';
+import type { CSSProperties, KeyboardEvent, PointerEvent } from 'react';
+import type { ClipModel, ClipSelection } from '../../shared/editor.ts';
 import { formatTime } from '../../shared/editor.ts';
 import type { Thumbnail } from '../../shared/media.ts';
 import { timelineTime, trimKeyValue, trimSelection, type TrimEdge } from '../../shared/timeline.ts';
 
 export type TimelineInteraction = { kind: TrimEdge | 'playhead'; phase: 'begin' | 'update' | 'end' | 'cancel' | 'keyboard'; timeUs: number };
+type TimelineClip = Pick<ClipModel, 'id' | 'number' | 'revision' | 'selection'>;
 type Props = {
-  durationUs: number; startUs: number; endUs: number; selection: ClipSelection; positionUs: number;
+  durationUs: number; startUs: number; endUs: number; clips: readonly TimelineClip[]; activeClipId: string; positionUs: number;
   thumbnails: Thumbnail[]; disabled: boolean; loading: boolean;
-  onSelect(value: ClipSelection): void; onInteraction(value: TimelineInteraction): void;
+  onActivate(id: string): void;
+  onSelect(value: ClipSelection, id: string): void; onInteraction(value: TimelineInteraction): void;
 };
-type Drag = { pointer: number; kind: TrimEdge | 'playhead'; initial: ClipSelection; position: number; anchor: number };
+type Drag = { pointer: number; clipId: string; kind: TrimEdge | 'playhead'; initial: ClipSelection; position: number; anchor: number };
 export function Timeline(props: Props) {
   const track = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
   const latest = useRef(props); latest.current = props;
   const span = props.endUs - props.startUs;
   const percent = (us: number) => Math.max(0, Math.min(100, (us - props.startUs) / span * 100));
-  const left = percent(props.selection.startUs); const right = percent(props.selection.endUs);
   const visible = (us: number) => us >= props.startUs && us <= props.endUs;
+  const activeClip = props.clips.find(clip => clip.id === props.activeClipId)!;
   function timeAt(event: PointerEvent): number {
     const rect = track.current!.getBoundingClientRect(); const p = latest.current;
     return timelineTime(event.clientX, rect.left, rect.width, p.startUs, p.endUs);
@@ -28,24 +30,25 @@ export function Timeline(props: Props) {
     const d = drag.current; if (!d || d.pointer !== event.pointerId) return;
     event.stopPropagation();
     const p = latest.current;
-    if (p.disabled) return;
+    if (p.disabled || !p.clips.some(clip => clip.id === d.clipId)) return;
     const value = timeAt(event);
     if (d.kind === 'playhead') d.position = value;
     else {
       const initial = d.kind === 'start' ? d.initial.startUs : d.initial.endUs;
       const selection = trimSelection(d.initial, d.kind, initial + value - d.anchor, p.durationUs);
       d.position = d.kind === 'start' ? selection.startUs : selection.endUs;
-      p.onSelect(selection);
+      // Retain the grabbed identity across activation/re-renders; never trim a different clip.
+      p.onSelect(selection, d.clipId);
     }
     p.onInteraction({ kind: d.kind, phase: 'update', timeUs: d.position });
   }
-  function begin(event: PointerEvent, kind: Drag['kind']) {
-    if (props.disabled || event.button !== 0) return;
-    event.preventDefault(); event.stopPropagation();
+  function begin(event: PointerEvent, kind: Drag['kind'], item = activeClip) {
+    if (props.disabled || event.button !== 0 || !item) return;
+    event.preventDefault(); event.stopPropagation(); props.onActivate(item.id);
     event.currentTarget.setPointerCapture(event.pointerId);
     event.currentTarget instanceof HTMLElement && event.currentTarget.focus();
-    const position = kind === 'playhead' ? timeAt(event) : kind === 'start' ? props.selection.startUs : props.selection.endUs;
-    drag.current = { pointer: event.pointerId, kind, initial: { ...props.selection }, position, anchor: timeAt(event) };
+    const position = kind === 'playhead' ? timeAt(event) : kind === 'start' ? item.selection.startUs : item.selection.endUs;
+    drag.current = { pointer: event.pointerId, clipId: item.id, kind, initial: { ...item.selection }, position, anchor: timeAt(event) };
     // Grabbing a wide handle does not shift the edge until it actually moves.
     props.onInteraction({ kind, phase: 'begin', timeUs: position });
   }
@@ -56,19 +59,19 @@ export function Timeline(props: Props) {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     latest.current.onInteraction({ kind: d.kind, phase: cancelled || latest.current.disabled ? 'cancel' : 'end', timeUs: d.position });
   }
-  function keyboard(event: KeyboardEvent, kind: Drag['kind']) {
-    if (props.disabled) return;
+  function keyboard(event: KeyboardEvent, kind: Drag['kind'], item = activeClip) {
+    if (props.disabled || !item) return;
     const minGap = Math.min(1000, props.durationUs);
-    const value = kind === 'playhead' ? props.positionUs : kind === 'start' ? props.selection.startUs : props.selection.endUs;
-    const min = kind === 'end' ? props.selection.startUs + minGap : kind === 'playhead' ? props.startUs : 0;
-    const max = kind === 'start' ? props.selection.endUs - minGap : kind === 'playhead' ? props.endUs : props.durationUs;
+    const value = kind === 'playhead' ? props.positionUs : kind === 'start' ? item.selection.startUs : item.selection.endUs;
+    const min = kind === 'end' ? item.selection.startUs + minGap : kind === 'playhead' ? props.startUs : 0;
+    const max = kind === 'start' ? item.selection.endUs - minGap : kind === 'playhead' ? props.endUs : props.durationUs;
     const next = trimKeyValue(event.key, value, min, max, event.shiftKey);
     if (next === null) return;
-    event.preventDefault();
+    event.preventDefault(); props.onActivate(item.id);
     let at = next;
     if (kind !== 'playhead') {
-      const selection = trimSelection(props.selection, kind, next, props.durationUs);
-      props.onSelect(selection); at = kind === 'start' ? selection.startUs : selection.endUs;
+      const selection = trimSelection(item.selection, kind, next, props.durationUs);
+      props.onSelect(selection, item.id); at = kind === 'start' ? selection.startUs : selection.endUs;
     }
     props.onInteraction({ kind, phase: 'keyboard', timeUs: at });
   }
@@ -82,20 +85,32 @@ export function Timeline(props: Props) {
     <div ref={track} className="timeline-track" data-testid="timeline" onPointerDown={e => begin(e, 'playhead')} {...interactions}>
       <div className="thumbnails" aria-hidden="true">{props.thumbnails.map((thumb, i) => <img key={`${thumb.url}:${i}`} src={thumb.url} alt="" draggable={false} />)}</div>
       {props.loading && props.thumbnails.length === 0 && <div className="timeline-loading">正在读取画面…</div>}
-      <div className="trim-dim trim-dim-left" style={{ width: `${left}%` }} />
-      <div className="trim-dim trim-dim-right" style={{ left: `${right}%`, width: `${100 - right}%` }} />
-      <div className="selection-band" style={{ left: `${left}%`, width: `${Math.max(0, right - left)}%` }} />
-      {(['start', 'end'] as const).map(edge => {
-        const value = edge === 'start' ? props.selection.startUs : props.selection.endUs;
-        if (!visible(value)) return null;
-        return <button key={edge} type="button" role="slider" aria-label={edge === 'start' ? '片段入点' : '片段出点'}
-          aria-orientation="horizontal" aria-valuemin={edge === 'start' ? 0 : props.selection.startUs + Math.min(1000, props.durationUs)}
-          aria-valuemax={edge === 'start' ? props.selection.endUs - Math.min(1000, props.durationUs) : props.durationUs}
-          aria-valuenow={value} aria-valuetext={formatTime(value)} disabled={props.disabled}
-          data-testid={`trim-${edge}`} className={`trim-handle trim-${edge}`} style={{ left: `${percent(value)}%` }}
-          onPointerDown={e => begin(e, edge)} onKeyDown={e => keyboard(e, edge)} {...interactions}>
-          <span aria-hidden="true" /><span className="trim-tooltip">{formatTime(value)}</span>
-        </button>;
+      {props.clips.length === 1 && <><div className="trim-dim trim-dim-left" style={{ width: `${percent(activeClip.selection.startUs)}%` }} />
+        <div className="trim-dim trim-dim-right" style={{ left: `${percent(activeClip.selection.endUs)}%`, width: `${100 - percent(activeClip.selection.endUs)}%` }} /></>}
+      {props.clips.map(item => {
+        const active = item.id === props.activeClipId;
+        const left = percent(item.selection.startUs), right = percent(item.selection.endUs);
+        return <div key={item.id} className={`clip-range ${active ? 'is-active' : ''}`} data-testid="clip-range" data-clip-id={item.id} data-revision={item.revision}
+          role="group" aria-label={`片段 ${item.number} 范围`} style={{ '--clip-color': ['#8bcec1', '#e6b76c', '#99b7ef', '#d89ecb', '#bdd285'][(item.number - 1) % 5] } as CSSProperties}>
+          {right > left && <button type="button" className="selection-band" aria-label={`选择片段 ${item.number}`} aria-pressed={active}
+            title={`片段 ${item.number} · ${formatTime(item.selection.startUs)} — ${formatTime(item.selection.endUs)}`}
+            disabled={props.disabled} style={{ left: `${left}%`, width: `${right - left}%` }}
+            onClick={() => props.onActivate(item.id)} onPointerDown={e => begin(e, 'playhead', item)} {...interactions}>
+            <span className="range-number">{String(item.number).padStart(2, '0')}</span>
+          </button>}
+          {(['start', 'end'] as const).map(edge => {
+            const value = edge === 'start' ? item.selection.startUs : item.selection.endUs;
+            if (!visible(value)) return null;
+            return <button key={edge} type="button" role="slider" aria-label={`片段 ${item.number} ${edge === 'start' ? '入点' : '出点'}`}
+              aria-orientation="horizontal" aria-valuemin={edge === 'start' ? 0 : item.selection.startUs + Math.min(1000, props.durationUs)}
+              aria-valuemax={edge === 'start' ? item.selection.endUs - Math.min(1000, props.durationUs) : props.durationUs}
+              aria-valuenow={value} aria-valuetext={formatTime(value)} disabled={props.disabled}
+              data-testid={active ? `trim-${edge}` : undefined} className={`trim-handle trim-${edge}`} style={{ left: `${percent(value)}%` }}
+              onPointerDown={e => begin(e, edge, item)} onKeyDown={e => keyboard(e, edge, item)} {...interactions}>
+              <span aria-hidden="true" /><span className="trim-tooltip">片段 {item.number} · {formatTime(value)}</span>
+            </button>;
+          })}
+        </div>;
       })}
       {visible(props.positionUs) && <button type="button" role="slider" aria-label="播放位置" aria-orientation="horizontal"
         aria-valuemin={props.startUs} aria-valuemax={props.endUs} aria-valuenow={props.positionUs} aria-valuetext={formatTime(props.positionUs)}

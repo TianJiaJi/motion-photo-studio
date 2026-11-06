@@ -39,11 +39,11 @@ test('host bounds unacknowledged pixels across epochs, steps from confirmed fram
     assert.equal(timeline.capture(latest.frameId).pts,latest.pts);
     autoAck=true;
     await timeline.control({assetId,epoch:9,action:'pause'});
-    const paused=frames.at(-1)!;assert.equal(paused.epoch,9);
+    const paused=frames.at(-1)!;assert.equal(paused.epoch,9);assert.notEqual(paused.sourceFrame,null);
     await timeline.control({assetId,epoch:10,action:'step',frameId:paused.frameId,direction:1});
-    assert.equal(frames.at(-1)!.sourceFrame,paused.sourceFrame+1);
+    assert.equal(frames.at(-1)!.sourceFrame,paused.sourceFrame!+1);
     await timeline.control({assetId,epoch:11,action:'seek',timeUs:1000000,boundary:'before',maximumEdge:960,final:true});
-    const right=frames.at(-1)!;assert.ok(right.timeUs<1000000);assert.ok((await prepared.index.get(right.sourceFrame+1)).timeUs>=1000000);
+    const right=frames.at(-1)!;assert.ok(right.timeUs<1000000);assert.ok((await prepared.index.get(right.sourceFrame!+1)).timeUs>=1000000);
     let deadline:NodeJS.Timeout|undefined;
     const completed=new Promise<void>((resolve,reject)=>{ended=resolve;deadline=setTimeout(()=>reject(new Error('Native host playback did not stop at the exclusive boundary')),6000);});
     try {

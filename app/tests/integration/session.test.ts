@@ -7,6 +7,7 @@ import { ffmpeg, ffprobe, runProcess } from '../../src/main/media/runner.ts';
 import { probeMedia } from '../../src/main/media/probe.ts';
 import { mediaInfo } from '../../src/main/media/info.ts';
 import { sha256 } from '../../src/main/motion/io.ts';
+import { recordMediaActivity } from '../media-activity.ts';
 const ff = (args: string[]) => runProcess(ffmpeg(), ['-hide_banner', '-v', 'error', '-nostdin', '-n', ...args]);
 async function fixture(path: string, seconds = 2, extra: string[] = []) {
   await ff(['-f', 'lavfi', '-i', `testsrc2=size=160x120:rate=30:duration=${seconds}`,
@@ -14,7 +15,7 @@ async function fixture(path: string, seconds = 2, extra: string[] = []) {
 }
 
 test('native sessions cache thumbnails, pin confirmed covers, revoke old assets and leave inputs intact', { timeout: 120000 }, async () => {
-  const h = await harness();
+  const h = await harness({ strict: true });
   try {
     const input = h.temp.file('视频 source.mp4'); await fixture(input);
     const originalHash = await sha256(input),asset = await h.manager.open(input);
@@ -27,7 +28,7 @@ test('native sessions cache thumbnails, pin confirmed covers, revoke old assets 
     assert.equal(response.status, 206); assert.equal((await response.arrayBuffer()).byteLength, 32);
     assert.deepEqual(await h.manager.thumbnails(asset.id, 0, asset.info.durationUs, 3, false), thumb);
     const frame = await h.seek(asset.id,510000),next = await h.step(asset.id,frame.frameId,1);
-    assert.ok(BigInt(next.pts) > BigInt(frame.pts));
+    assert.ok(BigInt(next.pts!) > BigInt(frame.pts!));
     await assert.rejects(h.manager.nativeCover(asset.id,frame.frameId),{code:'FRAME_BOUNDARY'});
     const cover = await h.manager.nativeCover(asset.id,next.frameId);
     const coverBytes = await (await h.resources.respond(new Request(cover.url), 'app://ui')).arrayBuffer();
@@ -85,7 +86,7 @@ test('source changes fail closed and switching sources invalidates old session I
 });
 
 test('nonzero source timestamps retain integer source PTS and zero-based native stepping', { timeout: 120000 }, async () => {
-  const h = await harness();
+  const h = await harness({ strict: true });
   try {
     const offset=h.temp.file('offset.mp4');await fixture(offset,2,['-output_ts_offset','5']);
     const source=await h.manager.open(offset);assert.equal(source.info.startUs,5000000);assert.equal(source.info.durationUs,2000000);
@@ -111,4 +112,48 @@ for(const transfer of ['smpte2084','arib-std-b67'])test(`${transfer} requires co
     const output=await probeMedia(join(root,files[0]!),{executable:ffprobe()});assert.equal(output.streams[0]?.color_transfer,'bt709');assert.equal(output.streams[0]?.color_primaries,'bt709');assert.equal(mediaInfo(output).hdr,false);
     assert.equal(mediaInfo(output).durationUs,asset.info.durationUs);await h.seek(asset.id,500000);
   }finally{await h.cleanup();}
+});
+
+test('quick on-demand sessions never fabricate display identity; step and cover resolve exact source frames', { timeout: 120000 }, async () => {
+  const h = await harness();
+  try {
+    const input = h.temp.file('quick.mp4');
+    await ff(['-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=30:duration=4',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=4', '-map', '0:v', '-map', '1:a',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-g', '250', '-bf', '3', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', input]);
+    const asset = await h.manager.open(input);
+    assert.equal(asset.info.audioTracks.length, 1);
+    const ready = await h.manager.prepareNative(asset.id, false);
+    assert.equal(ready.mode, 'quick'); assert.equal(ready.compatibility, false);
+    assert.equal(ready.frameCount, null, 'quick mode must not invent a whole-file frame count');
+    // Display frames carry verified display time but no fabricated source identity.
+    const shown = await h.seek(asset.id, 510000);
+    assert.ok(shown.timeUs >= 510000 && shown.timeUs < 600000);
+    assert.equal(shown.pts, null); assert.equal(shown.sourceFrame, null);
+    // Stepping resolves the exact presented frame on demand and moves exactly one frame.
+    const next = await h.step(asset.id, shown.frameId, 1);
+    assert.ok(next.pts !== null && next.timeUs > shown.timeUs);
+    // Cover capture pins the ACKed frame's verified identity; later seeks cannot change it.
+    await assert.rejects(h.manager.nativeCover(asset.id, next.frameId, next.epoch + 1), { code: 'FRAME_BOUNDARY' });
+    const cover = await h.manager.nativeCover(asset.id, next.frameId, next.epoch);
+    assert.equal(cover.kind, 'frame'); assert.ok(cover.timeUs !== null);
+    const coverBytes = await (await h.resources.respond(new Request(cover.url), 'app://ui')).arrayBuffer();
+    // Stepping back returns the shown frame's exact source frame, one presented frame back.
+    const back = await h.step(asset.id, next.frameId, -1);
+    assert.ok(back.pts !== null);
+    assert.ok(Math.abs(back.timeUs - shown.timeUs) <= 2);
+    await h.seek(asset.id, 2000000);
+    assert.deepEqual(await (await h.resources.respond(new Request(cover.url), 'app://ui')).arrayBuffer(), coverBytes);
+    const thumbs = await h.manager.thumbnails(asset.id, 0, asset.info.durationUs, 3, false);
+    assert.equal(thumbs.length, 3);
+    const repeated = await recordMediaActivity(() => h.manager.thumbnails(asset.id, 0, asset.info.durationUs, 3, false));
+    assert.deepEqual(repeated.result, thumbs); assert.equal(repeated.activity.native.length, 0); assert.equal(repeated.activity.spawns.length, 0);
+    const fallback = await h.manager.prepareNative(asset.id, false, asset.info.audioTracks[0]!.index, true);
+    assert.equal(fallback.mode, 'strict');
+    assert.deepEqual(await (await h.resources.respond(new Request(cover.url), 'app://ui')).arrayBuffer(), coverBytes);
+    await h.seek(asset.id, 1_000_000);
+    await h.manager.close(asset.id);
+    assert.deepEqual(await readdir(h.store.root), []);
+  } finally { await h.cleanup(); }
 });

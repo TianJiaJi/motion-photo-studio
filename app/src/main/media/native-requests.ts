@@ -1,3 +1,5 @@
+import { clipReference } from './clip-requests.ts';
+import type { ClipScope } from '../../shared/media-ipc.ts';
 import type { PreviewAck, PreviewControl } from '../../shared/native-preview.ts';
 import { AppFailure } from '../errors.ts';
 const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -13,13 +15,16 @@ function exact(value:Record<string,unknown>,keys:string[]) {
   if(Object.keys(value).length!==keys.length||keys.some(key=>!Object.hasOwn(value,key)))invalid();
 }
 function integer(value:unknown,minimum=0):value is number {return Number.isSafeInteger(value)&&(value as number)>=minimum;}
-export function parseNativePrepare(args:unknown[]):{assetId:string;hdrConsent:boolean} {
-  const value=object(args);exact(value,['assetId','hdrConsent']);if(typeof value.hdrConsent!=='boolean')invalid();
-  return value as {assetId:string;hdrConsent:boolean};
+export function parseNativePrepare(args:unknown[]):{assetId:string;hdrConsent:boolean;audioTrack?:number|null;forceStrict?:boolean} {
+  const value=object(args);exact(value,['assetId','hdrConsent',...(Object.hasOwn(value,'audioTrack')?['audioTrack']:[]),...(Object.hasOwn(value,'forceStrict')?['forceStrict']:[])]);
+  if(typeof value.hdrConsent!=='boolean'||Object.hasOwn(value,'audioTrack')&&value.audioTrack!==null&&!integer(value.audioTrack)
+    ||Object.hasOwn(value,'forceStrict')&&typeof value.forceStrict!=='boolean')invalid();
+  return value as {assetId:string;hdrConsent:boolean;audioTrack?:number|null;forceStrict?:boolean};
 }
-export function parseNativeCapture(args:unknown[]):{assetId:string;frameId:number} {
-  const value=object(args);exact(value,['assetId','frameId']);if(!integer(value.frameId,1))invalid();
-  return value as {assetId:string;frameId:number};
+export function parseNativeCapture(args:unknown[]):{assetId:string;frameId:number;epoch:number}&ClipScope {
+  const value=object(args);exact(value,['assetId','frameId','epoch',...(Object.hasOwn(value,'clipId')||Object.hasOwn(value,'revision')?['clipId','revision']:[])]);
+  if(!integer(value.frameId,1)||!integer(value.epoch,1))invalid();clipReference(value);
+  return value as {assetId:string;frameId:number;epoch:number}&ClipScope;
 }
 export function parseNativeAck(args:unknown[]):PreviewAck {
   const value=object(args);exact(value,['assetId','epoch','frameId','painted']);

@@ -9,6 +9,7 @@ import { openSource } from '../../src/main/media/source.ts';
 import { probeMedia } from '../../src/main/media/probe.ts';
 import { mediaInfo } from '../../src/main/media/info.ts';
 import { prepareNativeMedia, type PreparedNativeMedia } from '../../src/main/media/native-import.ts';
+import { PREVIEW_PROTOCOL_VERSION } from '../../src/shared/native-preview.ts';
 import type { NativeFrameInfo } from '../../src/main/media/native-preview.ts';
 const helper=resolve('resources/bin/motion-preview.exe');
 const skip=process.platform!=='win32';
@@ -58,7 +59,7 @@ test('new interaction epoch settles obsolete requests; parent-pipe loss releases
       }
     });
     orphan.stdin.on('error',()=>{});
-    const header=Buffer.from(JSON.stringify({version:1,id:1,generation:1,command:'open',path,maximumEdge:640}));
+    const header=Buffer.from(JSON.stringify({version:PREVIEW_PROTOCOL_VERSION,id:1,generation:1,command:'open',path,maximumEdge:640}));
     const length=Buffer.alloc(4);length.writeUInt32LE(header.length);orphan.stdin.write(Buffer.concat([length,header]));
     try {
       assert.equal(await ended,0);assert.equal(disconnected,true);

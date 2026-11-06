@@ -33,7 +33,7 @@ test('offline desktop uses bundled engines, isolates renderer, completes and can
     }));
     expect(surface.nodeRequire).toBe('undefined'); expect(surface.nodeProcess).toBe('undefined');
     expect(surface.keys).toEqual(['cancelJob', 'getSnapshot', 'media', 'onSnapshot', 'security', 'startDiagnostics']);
-    expect(await page.evaluate(() => Object.keys(window.motion.media).sort())).toEqual(['analyze', 'cancel', 'cancelImport', 'close', 'native', 'onExportProgress', 'open', 'renderDraft', 'saveDraft', 'thumbnails', 'uploadCover']);
+    expect(await page.evaluate(() => Object.keys(window.motion.media).sort())).toEqual(['analyze', 'cancel', 'cancelImport', 'clearCover', 'close', 'exportAll', 'native', 'onExportProgress', 'onImportSelected', 'open', 'renderDraft', 'saveDraft', 'syncClips', 'thumbnails', 'uploadCover']);
     expect(await page.evaluate(() => Object.keys(window.motion.media.native).sort())).toEqual(['acknowledge', 'capture', 'control', 'onFrame', 'onStatus', 'prepare']);
     const nativeInvalid = await page.evaluate(() => window.motion.media.native.prepare({ assetId: '12345678-1234-1234-1234-123456789abc', hdrConsent: false, path: 'C:\\arbitrary.mp4' } as any));
     expect(nativeInvalid.ok).toBe(false);

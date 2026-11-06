@@ -5,20 +5,22 @@ import type { MediaInfo } from '../../shared/media.ts';
 import { AppFailure } from '../errors.ts';
 import { unlinkCreatedFile } from '../jobs/temp-files.ts';
 import { buildFrameIndex, INDEX_RECORD_BYTES, type FrameIndex } from './frame-index.ts';
+import { StrictFrameProvider, type FrameProvider } from './frame-provider.ts';
 import { buildContainerFrameIndex } from './container-frame-index.ts';
 import { NativePreview, type NativeVideoInfo } from './native-preview.ts';
 import { assertSource, type SourceFile } from './source.ts';
 import { streamProcessLines } from './lines.ts';
-import { probeMedia } from './probe.ts';
+import { probeMedia, type MediaProbe } from './probe.ts';
 import { sdrColorProcessing } from './video-processing.ts';
 import { prepareNativeAudio, type PreparedAudioTrack } from './native-audio-import.ts';
 
 const MiB = 1024 * 1024;
-export type PreparedNativeMedia = {
-  index: FrameIndex; resource: string; native: NativePreview; nativeInfo: NativeVideoInfo;
+export type PreparedMedia = {
+  frames: FrameProvider; resource: string; native: NativePreview; nativeInfo: NativeVideoInfo;
   ownedPaths: string[]; manifest: string; compatibility: boolean; warnings: string[]; bytes: number;
   audio: PreparedAudioTrack[];
 };
+export type PreparedNativeMedia = PreparedMedia & { index: FrameIndex; frames: StrictFrameProvider };
 export type ImportProgress = { stage: 'source-index' | 'native-index' | 'compatibility' | 'audio'; frames?: number; bytes?: number };
 async function budget(directory: string, maximum: number, used = 0, reserve = 256 * MiB) {
   if (used > maximum) throw new AppFailure('PREVIEW_BUDGET', '编辑资源超过磁盘预算；未静默扩大缓存配额。');
@@ -29,7 +31,7 @@ async function budget(directory: string, maximum: number, used = 0, reserve = 25
 // Import-only API, not callable from renderer IPC. Caller passes a fresh owned session directory.
 // A failed import drains native handles BEFORE deleting only paths created by this invocation.
 export async function prepareNativeMedia(options: {
-  source: SourceFile; info: MediaInfo; directory: string; helper: string; ffprobe: string; ffmpeg: string;
+  source: SourceFile; info: MediaInfo; probe?: MediaProbe; directory: string; helper: string; ffprobe: string; ffmpeg: string;
   signal: AbortSignal; hdrConsent?: boolean; maximumEdge?: number; maxBytes?: number; reserveBytes?: number;
   forceCompatibility?: boolean; onProgress?: (value: ImportProgress) => void;
 }): Promise<PreparedNativeMedia> {
@@ -49,7 +51,7 @@ export async function prepareNativeMedia(options: {
   const indexPath = join(directory, `frame-index-${randomUUID()}.bin`);
   let index: FrameIndex | undefined; let native: NativePreview | undefined; let success = false;
   try {
-    const probe = await probeMedia(source.path, { executable: options.ffprobe, signal });
+    const probe = options.probe ?? await probeMedia(source.path, { executable: options.ffprobe, signal });
     const stream = probe.streams.find(stream => stream.index === info.videoIndex);
     if (!stream) throw new AppFailure('SOURCE_CHANGED', '视频轨道不存在。');
     const matrix = stream.color_space;
@@ -143,7 +145,7 @@ export async function prepareNativeMedia(options: {
     const bytes = (await Promise.all(paths.map(async path => (await stat(path)).size))).reduce((sum, size) => sum + size, 0);
     await budget(directory, maximum, bytes, reserve); await assertSource(source); signal.throwIfAborted();
     success = true;
-    return { index, resource, native, nativeInfo, ownedPaths: paths, manifest, compatibility, warnings, bytes, audio: audio.tracks };
+    return { index, frames: new StrictFrameProvider(index), resource, native, nativeInfo, ownedPaths: paths, manifest, compatibility, warnings, bytes, audio: audio.tracks };
   } finally {
     if (!success) {
       // If native termination cannot be confirmed, do NOT delete evidence or its open media.

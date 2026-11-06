@@ -26,10 +26,10 @@ for(const compatibility of [false,true])test(`native Canvas updates while held: 
     await app.evaluate(({dialog},file)=>{
       dialog.showOpenDialog=async()=>({canceled:false,filePaths:[file]});
       const cp=process.getBuiltinModule('node:child_process'),original=cp.spawn;
-      const rows:{executable:string;pid:number|undefined;closed:boolean}[]=[];
+      const rows:{executable:string;args:readonly string[];pid:number|undefined;closed:boolean}[]=[];
       (globalThis as any).__nativeUiSpawns=rows;
       cp.spawn=((...args:Parameters<typeof original>)=>{
-        const child=Reflect.apply(original,cp,args);const row={executable:String(args[0]),pid:child.pid,closed:false};rows.push(row);
+        const child=Reflect.apply(original,cp,args);const row={executable:String(args[0]),args:Array.isArray(args[1])?args[1]:[],pid:child.pid,closed:false};rows.push(row);
         child.once('close',()=>{row.closed=true;});return child;
       }) as typeof original;
       process.getBuiltinModule('node:module').syncBuiltinESMExports();
@@ -51,7 +51,11 @@ for(const compatibility of [false,true])test(`native Canvas updates while held: 
     });
     expect(inputIsolation.offscreen).toBe(true);
     await writeFile(join(root,'input-isolation.json'),JSON.stringify(inputIsolation,null,2));
-    const preparedStarts=await app.evaluate(()=>(globalThis as any).__nativeUiSpawns.length);
+    const preparedProcesses=await app.evaluate(()=>(globalThis as any).__nativeUiSpawns);
+    const preparedStarts=preparedProcesses.length;
+    const preparedHelpers=preparedProcesses.filter((row:any)=>row.executable.endsWith('motion-preview.exe'));
+    expect(preparedHelpers.filter((row:any)=>!row.closed)).toHaveLength(1);
+    expect(preparedHelpers).toHaveLength(compatibility?2:1);
     await page.evaluate(()=>{
       const events:unknown[]=[];(window as any).__nativePointerEvents=events;
       for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture'])document.addEventListener(type,event=>{
@@ -129,6 +133,8 @@ for(const compatibility of [false,true])test(`native Canvas updates while held: 
     await page.getByLabel('精确定位',{exact:true}).fill('00:00:01.000');await page.getByLabel('精确定位',{exact:true}).press('Enter');
     await expect(canvas).toHaveAttribute('data-time-us','1000000');
     await expect(page.getByTestId('displayed-frame')).toContainText('00:00:01.000');
+    // Ordinary scrubbing/keyboard seeking must remain process-free. Exact identity is on-demand.
+    expect(await app.evaluate(()=>(globalThis as any).__nativeUiSpawns.length)).toBe(preparedStarts);
     await page.getByRole('button',{name:'下一帧',exact:true}).click();
     await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(1000000);
     await expect(page.getByTestId('displayed-frame')).toContainText('00:00:01.033');
@@ -137,12 +143,20 @@ for(const compatibility of [false,true])test(`native Canvas updates while held: 
     await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us')),{timeout:8000}).toBeGreaterThan(1500000);
     await page.getByTestId('play-video').click();await expect(page.getByTestId('play-video')).toHaveText('播放选段');
     const spawns=await app.evaluate(()=>(globalThis as any).__nativeUiSpawns);
-    expect(spawns.slice(preparedStarts)).toEqual([]);
-    expect(spawns.filter((row:{executable:string})=>row.executable.endsWith('motion-preview.exe'))).toHaveLength(1);
+    const exactProcesses=spawns.slice(preparedStarts);
+    if(compatibility)expect(exactProcesses).toEqual([]);
+    else{
+      expect(exactProcesses.length).toBeGreaterThan(0);expect(exactProcesses.length).toBeLessThanOrEqual(8);
+      for(const process of exactProcesses){
+        expect(process.executable.endsWith('ffmpeg.exe')).toBe(true);expect(process.closed).toBe(true);
+        expect(process.args).toContain('wrapped_avframe');expect(process.args).toContain('framehash');expect(process.args).toContain('-an');
+      }
+    }
+    expect(spawns.filter((row:{executable:string})=>row.executable.endsWith('motion-preview.exe'))).toHaveLength(preparedHelpers.length);
     await page.getByRole('button',{name:'关闭素材',exact:true}).click();await expect(page.getByTestId('editor')).toHaveCount(0);
     expect(await readdir(join(userData,'media-sessions'))).toEqual([]);expect(await sha256(input)).toBe(before);expect(errors).toEqual([]);
     const closed=await app.evaluate(()=>(globalThis as any).__nativeUiSpawns);
-    expect(closed.find((row:{executable:string})=>row.executable.endsWith('motion-preview.exe')).closed).toBe(true);
+    expect(closed.every((row:{closed:boolean})=>row.closed)).toBe(true);
     await writeFile(join(root,'pointer-events.json'),JSON.stringify(await page.evaluate(()=>(window as any).__nativePointerEvents),null,2));
     await writeFile(join(root,'report.json'),JSON.stringify({compatibility,inputIsolation,evidence,spawns:closed,errors,sourceUnchanged:true},null,2));
   }catch(error){

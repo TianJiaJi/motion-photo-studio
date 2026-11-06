@@ -52,7 +52,10 @@ export class TempFiles {
     if(isAbsolute(rel)||!JOB_NAME.test(rel)||rel.includes('/')||rel.includes('\\'))throw new CleanupFailure('unsafe-path');return rel;
   }
   private async checkpoint(stage:CleanupStage,directory:string){await this.options.checkpoint?.(stage,directory);}
-  async initialize():Promise<string[]>{
+  async initialize(options:{discardStale?:boolean}={}):Promise<string[]>{
+    // Only the two application-private workspace roots opt into discarding legacy jobs.
+    // Call before accepting work, or after all readers/workers have drained on shutdown.
+    if(options.discardStale&&!['jobs','media-sessions'].includes(basename(this.root)))throw new CleanupFailure('unsafe-path');
     await unlinkedAncestors(this.root,true);await mkdir(this.root,{recursive:true});await this.rootReady();this.problems.clear();
     const jobs=new Set<string>();
     for await(const entry of await opendir(this.root)){
@@ -60,7 +63,12 @@ export class TempFiles {
       if(jobs.size>10000)throw new CleanupFailure('unsafe-path');
     }
     try{for(const job of await this.journal.jobs())jobs.add(job);}catch(error){this.note(basename(this.journal.directory),error);}
-    for(const job of jobs){try{await this.remove(join(this.root,job));}catch{/* Classified by remove; unknown directories are never adopted. */}}
+    for(const job of jobs){
+      try{
+        if(options.discardStale)await this.discardStale(job);
+        else await this.remove(join(this.root,job));
+      }catch(error){this.note(job,error);}
+    }
     const counts=new Map<CleanupReason,number>();for(const issue of this.problems.values())counts.set(issue.reason,(counts.get(issue.reason)??0)+1);
     return [...counts].map(([code,count])=>`${basename(this.root)}：${count} 项缓存未清理；${CLEANUP_REASONS[code]}。`);
   }
@@ -97,12 +105,30 @@ export class TempFiles {
       ||value.owner===OWNER&&keys==='job,owner,root'&&value.job===job&&value.root===await realpath(this.root);
     if(!valid)throw new CleanupFailure('invalid-marker');return data.identity;
   }
-  private async inventory(directory:string):Promise<Node[]>{
+  private async discardStale(job:string):Promise<void>{
+    await this.rootReady();const directory=join(this.root,job);
+    let id:string;
+    try{id=await directoryIdentity(directory);}catch(error){
+      if(!missing(error))throw error;
+      await this.journal.discardStale(job);return;
+    }
+    // Inspect the entire tree before deleting anything; refuse links, hard links,
+    // identity changes and excessive traversal even when a marker is absent/damaged.
+    const nodes=await this.inventory(directory,true);
+    for(const node of nodes)await retry(async()=>{
+      await this.rootReady();await sameDirectory(directory,id);
+      if(node.directory){await sameDirectory(node.path,node.id);await rmdir(node.path);}
+      else await unlinkIdentity(node.path,node.id);
+    });
+    await retry(async()=>{await this.rootReady();await sameDirectory(directory,id);await rmdir(directory);});
+    await this.journal.discardStale(job);this.problems.delete(job);
+  }
+  private async inventory(directory:string,includeMarker=false):Promise<Node[]>{
     const result:Node[]=[];
     const walk=async(path:string,depth:number):Promise<void>=>{
       if(depth>32)throw new CleanupFailure('unsafe-path');
       for await(const entry of await opendir(path)){
-        if(path===directory&&entry.name==='.owner.json')continue;
+        if(!includeMarker&&path===directory&&entry.name==='.owner.json')continue;
         const child=join(path,entry.name),stat=await lstat(child,{bigint:true});
         if(stat.isSymbolicLink()||!stat.isDirectory()&&!stat.isFile()||stat.isFile()&&stat.nlink!==1n)throw new CleanupFailure('unsafe-path');
         if(result.length>=10000)throw new CleanupFailure('unsafe-path');

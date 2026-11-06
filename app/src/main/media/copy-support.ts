@@ -3,6 +3,7 @@ import type { Stream } from './probe.ts';
 import type { CopyVideoTrack } from './copy-plan.ts';
 import { runProcess } from './runner.ts';
 import { assertSource, type SourceFile } from './source.ts';
+import { reconcilePresentationDurations } from './presentation-duration.ts';
 
 export type CopyStream = Omit<Stream, 'side_data_list'> & {
   profile?: string; codec_tag_string?: string; is_avc?: string; nal_length_size?: string | number;
@@ -78,8 +79,10 @@ export function assessCopySupport(probe: CopyProbe, keepAudio: boolean): CopySup
 export async function probeCopySource(source: SourceFile, executable: string, signal?: AbortSignal): Promise<CopyProbe> {
   await assertSource(source);
   const { stdout } = await runProcess(executable, ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_data_hash', 'sha256',
-    '-show_entries', 'stream=index,codec_type,codec_name,codec_tag_string,profile,width,height,pix_fmt,is_avc,nal_length_size,extradata_hash,sample_rate,channels,channel_layout,color_range,color_space,color_transfer,color_primaries,time_base,start_pts,start_time,duration_ts,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation,displaymatrix:format=format_name',
+    '-show_entries', 'stream=index,id,codec_type,codec_name,codec_tag_string,profile,width,height,pix_fmt,is_avc,nal_length_size,extradata_hash,sample_rate,channels,channel_layout,color_range,color_space,color_transfer,color_primaries,time_base,start_pts,start_time,duration_ts,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation,displaymatrix:format=format_name',
     '-of', 'json', '-i', source.path], { signal });
+  const probe = JSON.parse(stdout) as CopyProbe;
+  await reconcilePresentationDurations(source.path, probe, signal);
   await assertSource(source);
-  return JSON.parse(stdout) as CopyProbe;
+  return probe;
 }

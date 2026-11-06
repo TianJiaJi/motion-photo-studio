@@ -133,10 +133,12 @@ test('offline editor imports through native dialog, paints Canvas, steps frames,
     await page.getByLabel('精确定位', { exact: true }).fill('00:00:01.000');await page.getByLabel('精确定位', { exact: true }).press('Enter');
     await expect.poll(async()=>Number(await canvas.getAttribute('data-epoch'))).toBeGreaterThan(sameValueEpoch);
     await expect(canvas).toHaveAttribute('data-time-us','1000000');
+    await page.getByTestId('export-motion').click();
     await page.getByLabel('输出帧率', { exact: true }).selectOption('24');
     await page.getByLabel('分辨率', { exact: true }).selectOption('1080');
     await expect(page.getByLabel('输出帧率', { exact: true })).toHaveValue('24');
     await page.getByLabel('保留音轨', { exact: true }).uncheck();
+    await page.getByRole('button', { name: '关闭导出', exact: true }).click();
     // Independently observe IPC pixel payloads and compare the actual Canvas readback, not a wall clock.
     // This muted visual check does not establish physical audio/video latency.
     await page.evaluate(() => {
@@ -152,6 +154,7 @@ test('offline editor imports through native dialog, paints Canvas, steps frames,
     await seekField.fill('00:00:01.000'); // An explicit same-value input may not fire React onChange.
     // Start real native playback without blurring the field: isolate incoming-prop/input ordering.
     // Actual pointer-capture acceptance remains in the separate native-preview tests.
+    await expect(page.getByTestId('play-video')).toBeEnabled(); // Wait for the restored Canvas acknowledgment, not just a native IPC frame.
     await page.getByTestId('play-video').evaluate(node=>(node as HTMLButtonElement).click());
     await expect(seekField).toBeFocused();
     await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(1100000);
@@ -175,13 +178,15 @@ test('offline editor imports through native dialog, paints Canvas, steps frames,
     await expect.poll(async()=>parseTime(await page.getByTestId('playhead').innerText())).toBe(Math.floor(presented.timeUs/1000)*1000);
     await expect(page.getByTestId('video-preview')).toHaveCount(0);
     await expect(page.getByLabel('强制兼容预览', { exact: true })).toHaveCount(0);
-    await expect(page.locator('.preview-caption strong')).toContainText('原片解码');
+    await expect(page.locator('.preview-caption strong')).toContainText('编辑预览');
     await page.getByLabel('时间轴缩放', { exact: true }).focus(); await page.getByLabel('时间轴缩放', { exact: true }).press('ArrowRight');
     await expect(page.getByLabel('时间轴缩放', { exact: true })).toHaveValue('1');
     await expect(page.getByLabel('时间轴视口起点', { exact: true })).toBeVisible();
     await page.getByTestId('open-video').click(); // Native chooser cancellation preserves current edits.
     await expect(page.getByTestId('asset-name')).toHaveText('测试片段.mp4');
+    await page.getByTestId('export-motion').click();
     await expect(page.getByLabel('输出帧率', { exact: true })).toHaveValue('24');
+    await page.getByRole('button', { name: '关闭导出', exact: true }).click();
     await expect(page.getByTestId('cover-description')).toContainText('自定义封面.png');
     await expect(page.locator('.thumbnails img')).toHaveCount(8);
     await expect.poll(() => page.locator('.thumbnails img').evaluateAll(nodes => nodes.every(node => (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth > 0))).toBe(true);
@@ -257,23 +262,22 @@ test('editor maps rotated display coordinates, previews HEVC natively and gates 
     await page.screenshot({ path: resolve('../artifacts/desktop/m4-ui-portrait.png') });
     await page.getByTestId('open-video').click(); await expect(page.getByTestId('asset-name')).toHaveText('HEVC.mp4');
     await expect(canvas).toHaveAttribute('data-frame-id', /\d+/, {timeout:60000});
-    await expect(page.locator('.preview-caption strong')).toContainText('原生低清预览');
+    await expect(page.locator('.preview-caption strong')).toContainText('编辑预览');
+    await page.getByTestId('export-motion').click();
     await page.getByLabel('原画质（跟随原片）', { exact: true }).check();
-    await page.getByTestId('preview-output').click();
-    const matched = page.getByRole('dialog', { name: '输出预览', exact: true });
-    await expect(matched).toBeVisible(); await expect(page.getByTestId('save-motion')).toBeEnabled({ timeout: 60000 });
-    await expect(page.getByTestId('output-proof')).toContainText('原画质预设');
-    await expect.poll(() => page.getByTestId('output-video').evaluate(node => [(node as HTMLVideoElement).videoWidth, (node as HTMLVideoElement).videoHeight])).toEqual([320, 240]);
-    await page.getByRole('button', { name: '关闭输出预览', exact: true }).click();
+    const matched = page.getByRole('dialog', { name: '导出实况照片', exact: true });
+    await expect(matched).toBeVisible(); await expect(page.getByTestId('export-play')).toBeEnabled({ timeout: 60000 });
+    await expect.poll(() => canvas.evaluate(node => [(node as HTMLCanvasElement).width, (node as HTMLCanvasElement).height])).toEqual([320, 240]);
     await expect(page.getByLabel('原画质（跟随原片）', { exact: true })).toBeChecked();
     await expect(page.getByLabel('输出帧率', { exact: true })).toBeDisabled();
+    await page.getByRole('button', { name: '关闭导出', exact: true }).click();
     await page.getByTestId('open-video').click(); await expect(page.getByTestId('asset-name')).toHaveText('HDR.mp4');
-    await expect(page.getByLabel('原画质（跟随原片）', { exact: true })).not.toBeChecked();
+    await expect(page.getByTestId('source-matching')).not.toBeChecked();
     const consent = page.getByLabel('同意 HDR 转 SDR', { exact: true });
     await expect(consent).not.toBeChecked(); await expect(page.getByTestId('play-video')).toBeDisabled();
     await expect(canvas).not.toHaveAttribute('data-frame-id');
     await consent.check();
-    await expect(page.locator('.preview-caption strong')).toContainText('兼容素材');
+    await expect(page.locator('.preview-caption strong')).toContainText('兼容预览');
     await expect(canvas).toHaveAttribute('data-frame-id', /\d+/, {timeout:60000});
     await consent.uncheck(); await expect(page.getByTestId('play-video')).toBeDisabled();
     await expect(canvas).not.toHaveAttribute('data-frame-id');

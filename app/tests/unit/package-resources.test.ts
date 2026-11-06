@@ -5,7 +5,7 @@ import {dirname} from 'node:path';
 import {createHash} from 'node:crypto';
 import {tempFiles} from '../helpers.ts';
 import {resourceSnapshot,checkPackagedResources} from '../../scripts/lib/package-resources.ts';
-import {PREVIEW_ENGINE_VERSION,PREVIEW_RUST_VERSION} from '../../src/shared/native-preview.ts';
+import {PREVIEW_ENGINE_VERSION,PREVIEW_PROTOCOL_VERSION,PREVIEW_RUST_VERSION} from '../../src/shared/native-preview.ts';
 const hash=(bytes:string|Buffer)=>createHash('sha256').update(bytes).digest('hex');
 test('package resource verification binds the exact lock and notice bytes, rejecting differences before executing any helper',async()=>{
   const temp=await tempFiles();
@@ -14,7 +14,7 @@ test('package resource verification binds the exact lock and notice bytes, rejec
     const lock='fixture lock';
     const files:{[name:string]:string|Buffer}={
       'bin/motion-preview.exe':pe,'engine-manifest.json':'{}',
-      'native-preview-manifest.json':JSON.stringify({schemaVersion:1,engine:'motion-preview',engineVersion:PREVIEW_ENGINE_VERSION,protocolVersion:1,platform:'win32',arch:'x64',target:'x86_64-pc-windows-msvc',rustVersion:PREVIEW_RUST_VERSION,crt:'static',sourceLockSha256:hash(lock),binary:{name:'motion-preview.exe',size:pe.length,sha256:hash(pe)}}),
+      'native-preview-manifest.json':JSON.stringify({schemaVersion:1,engine:'motion-preview',engineVersion:PREVIEW_ENGINE_VERSION,protocolVersion:PREVIEW_PROTOCOL_VERSION,platform:'win32',arch:'x64',target:'x86_64-pc-windows-msvc',rustVersion:PREVIEW_RUST_VERSION,crt:'static',sourceLockSha256:hash(lock),binary:{name:'motion-preview.exe',size:pe.length,sha256:hash(pe)}}),
       'licenses/native-preview/Cargo.lock':lock,'licenses/native-preview/DEPENDENCIES.json':'{}','licenses/native-preview/NOTICE.txt':'notice',
       'licenses/native-preview/rust-toolchain/COPYRIGHT-library.html':'copyright',
     };

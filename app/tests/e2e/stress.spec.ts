@@ -1,7 +1,7 @@
 import { test, expect, _electron as electron } from '@playwright/test';
 import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, open, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { sha256, extractRange } from '../../src/main/motion/io.ts';
 import { validateMotion } from '../../src/main/motion/validate.ts';
@@ -27,17 +27,17 @@ test('opt-in packaged native UI handles large sources and two-hour end seeks, in
   expect(fixtures[0]!.inputBytes).toBeGreaterThan(0xffffffff); expect(fixtures[1]!.durationUs).toBe(7200000000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-ui-stress-')); const userData = join(directory, 'user-data');
   const outputDir = resolve(`../artifacts/m5/ui-${Date.now()}-${randomUUID().slice(0, 8)}`); await mkdir(outputDir, { recursive: true });
-  const outputs = fixtures.map((_row, i) => join(outputDir, `${i}-尾部实况.jpg`));
+  const outputs = fixtures.map((_row, i) => join(outputDir, `clip-${i}`, '输入 source_片段01.jpg'));
+  for (const output of outputs) await mkdir(dirname(output));
   const results: unknown[] = []; const metrics: unknown[] = [];
   let instance: Awaited<ReturnType<typeof electron.launch>> | undefined;
   let stopped = false; let sampling: Promise<void> | undefined;
   try {
     instance = await electron.launch({ executablePath: resolve(process.env.MOTION_PACKAGED_EXE!), args: [], env: environment(userData), timeout: 60000 });
     await instance.evaluate(({ dialog }, paths) => {
-      const opens = [...paths.inputs]; const saves = [...paths.outputs];
-      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [opens.shift()!] });
-      dialog.showSaveDialog = async () => { const filePath = saves.shift(); if (!filePath) throw new Error('Unexpected save chooser'); return { canceled: false, filePath }; };
-    }, { inputs: fixtures.map(row => row.input), outputs });
+      let current = -1;
+      dialog.showOpenDialog = async (...args: any[]) => ({ canceled: false, filePaths: [args.at(-1).properties.includes('openDirectory') ? paths.directories[current]! : paths.inputs[++current]!] });
+    }, { inputs: fixtures.map(row => row.input), directories: outputs.map(path => dirname(path)) });
     const app = instance;
     sampling = (async () => {
       while (!stopped) {
@@ -81,24 +81,23 @@ test('opt-in packaged native UI handles large sources and two-hour end seeks, in
       await expect(page.getByLabel('强制兼容预览', { exact: true })).toHaveCount(0);
       await page.getByLabel('截取开始', { exact: true }).fill(time(start)); await page.getByLabel('截取开始', { exact: true }).press('Enter');
       await page.getByLabel('截取结束', { exact: true }).fill(time(end)); await page.getByLabel('截取结束', { exact: true }).press('Enter');
-      await page.getByLabel('原画质（跟随原片）', { exact: true }).check();
+      await page.getByTestId('export-motion').click(); await page.getByLabel('原画质（跟随原片）', { exact: true }).check();
       let cancelMs: number | null = null;
       if (index === 0) {
-        await page.getByTestId('export-motion').click(); await expect(page.getByRole('button', { name: '取消处理', exact: true })).toBeVisible();
+        await page.getByTestId('confirm-export-all').click(); await expect(page.getByRole('button', { name: '取消处理', exact: true })).toBeVisible();
         const began = Date.now(); await page.getByRole('button', { name: '取消处理', exact: true }).click();
-        const cancelled = page.getByRole('dialog', { name: '输出预览', exact: true });
-        await expect(cancelled).toContainText('处理已取消，未发布新的成品。', { timeout: 10000 }); cancelMs = Date.now() - began;
-        expect(cancelMs).toBeLessThan(10000); expect(await readdir(outputDir)).toEqual([]);
-        await page.getByRole('button', { name: '关闭输出预览', exact: true }).click();
+        const cancelled = page.getByRole('dialog', { name: '导出实况照片', exact: true });
+        await expect(cancelled.getByTestId('batch-result')).toContainText('已取消导出', { timeout: 10000 }); cancelMs = Date.now() - began;
+        expect(cancelMs).toBeLessThan(10000); expect(await readdir(dirname(outputs[index]!))).toEqual([]);
       }
-      await page.getByTestId('export-motion').click(); const preview = page.getByRole('dialog', { name: '输出预览', exact: true });
-      await expect(preview).toBeVisible({ timeout: 240000 }); await page.getByTestId('save-motion').click();
-      await expect(page.getByTestId('save-result')).toContainText('已保存', { timeout: 120000 });
+      const preview = page.getByRole('dialog', { name: '导出实况照片', exact: true });
+      await expect(preview).toBeVisible({ timeout: 240000 }); await page.getByTestId('confirm-export-all').click();
+      await expect(page.getByTestId('batch-result')).toContainText('已保存 1', { timeout: 120000 });
       await page.screenshot({ path: join(outputDir, `${index}-saved.png`) });
       const inspected = await validateMotion(outputs[index]!, true); const video = join(outputDir, `${index}-extracted.mp4`);
       await extractRange(outputs[index]!, video, inspected.videoStart, inspected.videoEnd);
       await runProcess(resolve('resources/bin/ffmpeg.exe'), ['-v', 'error', '-nostdin', '-xerror', '-err_detect', 'explode', '-i', video, '-map', '0:v', '-map', '0:a?', '-f', 'null', '-']); await unlink(video);
-      await page.getByRole('button', { name: '关闭输出预览', exact: true }).click(); await page.getByRole('button', { name: '关闭素材', exact: true }).click();
+      await page.getByRole('button', { name: '关闭导出', exact: true }).click(); await page.getByRole('button', { name: '关闭素材', exact: true }).click();
       await expect(page.getByTestId('editor')).toHaveCount(0); expect(await sha256(fixture.input)).toBe(fixture.inputSha256);
       results.push({ fixture: fixture.name, requestedStartSeconds: start, requestedEndSeconds: end, range: { offset, length: 64, total: fixture.inputBytes },
         sourceFrameTimeUs, cancelMs, output: outputs[index], outputSha256: await sha256(outputs[index]!), validated: inspected });

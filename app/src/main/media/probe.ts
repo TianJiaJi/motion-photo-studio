@@ -1,4 +1,5 @@
 import { ffprobe, ffmpeg, runProcess } from './runner.ts';
+import { reconcilePresentationDurations } from './presentation-duration.ts';
 
 export type Stream = {
   index: number; id?: string; codec_type: string; codec_name: string; profile?: string; width?: number; height?: number;
@@ -13,7 +14,9 @@ export async function probeMedia(path: string, options: { executable?: string; s
   const { stdout } = await runProcess(options.executable ?? ffprobe(), ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_entries',
     'stream=index,id,codec_type,codec_name,profile,width,height,pix_fmt,avg_frame_rate,r_frame_rate,duration,color_space,color_transfer,color_primaries,color_range,sample_rate,channels,time_base,start_pts,start_time,duration_ts,sample_aspect_ratio:stream_disposition=attached_pic:stream_side_data=rotation:format=duration,format_name',
     '-of', 'json', '-i', path], { signal: options.signal });
-  return JSON.parse(stdout) as MediaProbe;
+  const probe = JSON.parse(stdout) as MediaProbe;
+  await reconcilePresentationDurations(path, probe, options.signal);
+  return probe;
 }
 
 export async function decodeVideo(path: string): Promise<void> {

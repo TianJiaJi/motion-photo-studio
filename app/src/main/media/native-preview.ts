@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { dirname, isAbsolute } from 'node:path';
 import { AppFailure } from '../errors.ts';
-import { PREVIEW_ENGINE_VERSION } from '../../shared/native-preview.ts';
+import { PREVIEW_ENGINE_VERSION, PREVIEW_PROTOCOL_VERSION } from '../../shared/native-preview.ts';
 
 export type NativeVideoInfo = {
   width: number; height: number; sourceWidth: number; sourceHeight: number;
@@ -80,7 +80,7 @@ export class NativePreview {
       if (length < 1 || length > HEADER_LIMIT) throw new Error('Invalid native header length');
       if (this.carry.length < length + 4) return;
       const header = JSON.parse(this.carry.subarray(4, length + 4).toString('utf8')) as Record<string, unknown>;
-      if (!header || header.version !== 1 || !integer(header.id) || !integer(header.generation)
+      if (!header || header.version !== PREVIEW_PROTOCOL_VERSION || !integer(header.id) || !integer(header.generation)
         || !integer(header.bodyBytes) || header.bodyBytes > PIXEL_LIMIT
         || Object.keys(header).some(key => !['version', 'id', 'generation', 'bodyBytes', 'result', 'error'].includes(key))) throw new Error('Invalid native envelope');
       const pending = this.pending.get(header.id);
@@ -109,7 +109,7 @@ export class NativePreview {
     if (this.failure) return Promise.reject(this.failure);
     if (this.pending.size >= 4) return Promise.reject(new AppFailure('NATIVE_BUSY', '原生预览请求队列已满。'));
     const id = ++this.next;
-    const data = Buffer.from(JSON.stringify({ ...command, version: 1, id, generation: this.generation }));
+    const data = Buffer.from(JSON.stringify({ ...command, version: PREVIEW_PROTOCOL_VERSION, id, generation: this.generation }));
     if (data.length > HEADER_LIMIT) return Promise.reject(new Error('Native request too large'));
     const length = Buffer.alloc(4); length.writeUInt32LE(data.length);
     return new Promise((resolve, reject) => {

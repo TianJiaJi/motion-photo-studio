@@ -16,7 +16,12 @@ test('native controls accept only bounded identities and declared fields, never 
 });
 test('prepare/capture/paint acknowledgments reject arbitrary media and stale-shaped arguments',()=>{
   assert.deepEqual(parseNativePrepare([{assetId,hdrConsent:false}]),{assetId,hdrConsent:false});
-  assert.deepEqual(parseNativeCapture([{assetId,frameId:1}]),{assetId,frameId:1});
+  for(const audioTrack of [null,0,2]) assert.deepEqual(parseNativePrepare([{assetId,hdrConsent:false,audioTrack}]),{assetId,hdrConsent:false,audioTrack});
+  for(const audioTrack of [-1,0.5,'1',undefined]) assert.throws(()=>parseNativePrepare([{assetId,hdrConsent:false,audioTrack}]),{code:'INVALID_REQUEST'});
+  assert.deepEqual(parseNativeCapture([{assetId,frameId:1,epoch:2}]),{assetId,frameId:1,epoch:2});
+  assert.throws(()=>parseNativeCapture([{assetId,frameId:1}]),{code:'INVALID_REQUEST'});
+  assert.deepEqual(parseNativePrepare([{assetId,hdrConsent:false,forceStrict:true}]),{assetId,hdrConsent:false,forceStrict:true});
+  assert.throws(()=>parseNativePrepare([{assetId,hdrConsent:false,forceStrict:'true'}]),{code:'INVALID_REQUEST'});
   assert.deepEqual(parseNativeAck([{assetId,epoch:2,frameId:3,painted:true}]),{assetId,epoch:2,frameId:3,painted:true});
   assert.throws(()=>parseNativeCapture([{assetId,frameId:0}]),{code:'INVALID_REQUEST'});
   assert.throws(()=>parseNativeCapture([{assetId,frameId:1,pts:'999'}]),{code:'INVALID_REQUEST'});

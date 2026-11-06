@@ -6,7 +6,7 @@ import {NativePreview} from './native-preview.ts';
 import {PREVIEW_ENGINE_VERSION,PREVIEW_PROTOCOL_VERSION,PREVIEW_RUST_VERSION} from '../../shared/native-preview.ts';
 
 export type NativeEngineManifest={
-  schemaVersion:1;engine:'motion-preview';engineVersion:string;protocolVersion:1;platform:'win32';arch:'x64';
+  schemaVersion:1;engine:'motion-preview';engineVersion:string;protocolVersion:2;platform:'win32';arch:'x64';
   target:'x86_64-pc-windows-msvc';rustVersion:string;crt:'static';sourceLockSha256:string;
   binary:{name:'motion-preview.exe';size:number;sha256:string};
 };

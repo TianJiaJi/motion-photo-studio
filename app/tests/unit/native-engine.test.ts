@@ -4,16 +4,16 @@ import {mkdir,writeFile,readFile,symlink,unlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {parseNativeEngineManifest,verifyNativeFiles,verifyNativeEngine} from '../../src/main/media/native-engine.ts';
-import {PREVIEW_ENGINE_VERSION,PREVIEW_RUST_VERSION} from '../../src/shared/native-preview.ts';
+import {PREVIEW_ENGINE_VERSION,PREVIEW_PROTOCOL_VERSION,PREVIEW_RUST_VERSION} from '../../src/shared/native-preview.ts';
 import {tempFiles} from '../helpers.ts';
 function fixture(){
   const pe=Buffer.alloc(256);pe.writeUInt16LE(0x5a4d,0);pe.writeUInt32LE(128,0x3c);pe.writeUInt32LE(0x4550,128);pe.writeUInt16LE(0x8664,132);pe.writeUInt16LE(0x20b,152);
-  const manifest={schemaVersion:1,engine:'motion-preview',engineVersion:PREVIEW_ENGINE_VERSION,protocolVersion:1,platform:'win32',arch:'x64',target:'x86_64-pc-windows-msvc',rustVersion:PREVIEW_RUST_VERSION,crt:'static',sourceLockSha256:'a'.repeat(64),binary:{name:'motion-preview.exe',size:pe.length,sha256:createHash('sha256').update(pe).digest('hex')}};
+  const manifest={schemaVersion:1,engine:'motion-preview',engineVersion:PREVIEW_ENGINE_VERSION,protocolVersion:PREVIEW_PROTOCOL_VERSION,platform:'win32',arch:'x64',target:'x86_64-pc-windows-msvc',rustVersion:PREVIEW_RUST_VERSION,crt:'static',sourceLockSha256:'a'.repeat(64),binary:{name:'motion-preview.exe',size:pe.length,sha256:createHash('sha256').update(pe).digest('hex')}};
   return {pe,manifest};
 }
 test('native manifest has a distinct, closed version/target/hash schema',()=>{
   const {manifest}=fixture();assert.equal(parseNativeEngineManifest(manifest).binary.name,'motion-preview.exe');
-  for(const changed of [{protocolVersion:2},{engineVersion:'9.0.0'},{rustVersion:'latest'},{arch:'arm64'},{extra:'path'},{crt:'dynamic'},{sourceLockSha256:'no'}])assert.throws(()=>parseNativeEngineManifest({...manifest,...changed}),{code:'NATIVE_ENGINE_VERSION'});
+  for(const changed of [{protocolVersion:PREVIEW_PROTOCOL_VERSION+1},{protocolVersion:1},{engineVersion:'9.0.0'},{rustVersion:'latest'},{arch:'arm64'},{extra:'path'},{crt:'dynamic'},{sourceLockSha256:'no'}])assert.throws(()=>parseNativeEngineManifest({...manifest,...changed}),{code:'NATIVE_ENGINE_VERSION'});
   for(const binary of [{...manifest.binary,name:'../motion-preview.exe'},{...manifest.binary,size:Infinity},{...manifest.binary,size:65*1024*1024},{...manifest.binary,sha256:'x'.repeat(64)},{...manifest.binary,args:[]}])assert.throws(()=>parseNativeEngineManifest({...manifest,binary}),{code:'NATIVE_ENGINE_VERSION'});
 });
 test('missing, tampered and wrong-machine native resources fail before any helper launch',async()=>{
@@ -27,7 +27,8 @@ test('missing, tampered and wrong-machine native resources fail before any helpe
     const bad=Buffer.from(pe);bad[200]=1;await writeFile(exe,bad);await assert.rejects(verifyNativeEngine(temp.directory),{code:'NATIVE_ENGINE_INTEGRITY'});
     bad.writeUInt16LE(0x14c,132);manifest.binary.sha256=createHash('sha256').update(bad).digest('hex');await writeFile(exe,bad);await writeFile(manifestPath,JSON.stringify(manifest));
     await assert.rejects(verifyNativeEngine(temp.directory),{code:'NATIVE_ENGINE_INTEGRITY'});
-    manifest.protocolVersion=2;await writeFile(manifestPath,JSON.stringify(manifest));await assert.rejects(verifyNativeEngine(temp.directory),{code:'NATIVE_ENGINE_VERSION'});
+    // An old helper manifest must not be silently accepted after a protocol bump.
+    manifest.protocolVersion=1;await writeFile(manifestPath,JSON.stringify(manifest));await assert.rejects(verifyNativeEngine(temp.directory),{code:'NATIVE_ENGINE_VERSION'});
   }finally{await temp.cleanup();}
 });
 test('binary-directory junctions are refused and no alternate PATH executable is selected',async()=>{

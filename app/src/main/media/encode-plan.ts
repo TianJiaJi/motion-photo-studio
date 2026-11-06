@@ -4,6 +4,7 @@ import type { MediaProbe } from './probe.ts';
 import { mediaInfo } from './info.ts';
 import { assertSource, type SourceFile } from './source.ts';
 import { streamProcessLines } from './lines.ts';
+import { AppFailure } from '../errors.ts';
 
 export type PresentedFrame = { pts: bigint; duration: bigint | null };
 export type EncodeRangePlan = {
@@ -39,12 +40,21 @@ export function requestedFramePts(info: Pick<MediaInfo, 'startPts' | 'timeBase'>
 // A demuxer may seek later than requested: retry farther back until an earlier frame establishes coverage.
 export type FrameScanTrace = { timeUs: number; seekUs: number; lines: number; frames: number; stopped: boolean; stdoutBytes: number;
   firstPts: string | null; lastPts: string | null; foundPts: string | null };
-async function frameAtOrAfter(source: SourceFile, info: MediaInfo, timeUs: number,
-  executable: string, signal?: AbortSignal, onScan?: (trace: FrameScanTrace) => void): Promise<{ found: PresentedFrame | null; last: PresentedFrame | null }> {
+export type FrameNeighbor = { found: PresentedFrame | null; last: PresentedFrame | null };
+// Optional interactive budget. Export planning retains its existing independent contract.
+export type FrameScanBudget = { maxFrames: number; maxBackUs: number; timeoutMs: number };
+export async function frameAtOrAfter(source: SourceFile, info: MediaInfo, timeUs: number,
+  executable: string, signal?: AbortSignal, onScan?: (trace: FrameScanTrace) => void, budget?: FrameScanBudget): Promise<FrameNeighbor> {
   const target = requestedFramePts(info, timeUs);
+  if (budget && (!Number.isSafeInteger(budget.maxFrames) || budget.maxFrames < 1 || !Number.isSafeInteger(budget.maxBackUs)
+    || budget.maxBackUs < 1_000_000 || !Number.isSafeInteger(budget.timeoutMs) || budget.timeoutMs < 1)) throw new Error('Invalid local frame budget');
+  const started = performance.now(); let scanned = 0;
+  const limit = () => new AppFailure('LOCAL_FRAME_LIMIT', '当前邻域超出精确解析预算，请改用兼容准备。');
   let backUs = 1000000;
   for (;;) {
     signal?.throwIfAborted();
+    const remainingMs = budget ? budget.timeoutMs - Math.ceil(performance.now() - started) : 0;
+    if (budget && (backUs > budget.maxBackUs || remainingMs <= 0)) throw limit();
     const seekUs = Math.max(0, timeUs - backUs);
     const state: { first: PresentedFrame | null; last: PresentedFrame | null; found: PresentedFrame | null; retry: boolean } = {
       first: null, last: null, found: null, retry: false,
@@ -66,19 +76,54 @@ async function frameAtOrAfter(source: SourceFile, info: MediaInfo, timeUs: numbe
       }
       const frame = parsePresentedFrame(line, 0); if (!frame) return;
       if (!clockSeen) throw new Error('Missing decoded frame time base');
-      frames++;
+      frames++; scanned++;
+      if (budget && scanned > budget.maxFrames) throw limit();
       if (!state.first && seekUs > 0 && frame.pts >= target) { state.retry = true; return true; }
       if (state.last && frame.pts <= state.last.pts) throw new Error('视频呈现时间不递增，无法确认精确剪点。');
       state.first ??= frame;
       if (frame.pts >= target) { state.found = frame; return true; }
       state.last = frame;
-    }, { signal, timeoutMs: 0 });
+    }, { signal, timeoutMs: remainingMs });
     onScan?.({ timeUs, seekUs, lines, frames, stopped: result.stopped, stdoutBytes: result.stdoutBytes,
       firstPts: state.first?.pts.toString() ?? null, lastPts: state.last?.pts.toString() ?? null, foundPts: state.found?.pts.toString() ?? null });
     if (result.stderr.trim()) throw new Error(`Frame-boundary decoder reported an error: ${result.stderr}`);
     if (seekUs > 0 && (state.retry || !state.first)) { backUs = Math.min(timeUs, backUs * 2); continue; }
     return { found: state.found, last: state.last };
   }
+}
+
+// Bounded presented-PTS window from the start of the stream (or from a time, in which case
+// decoding starts at the preceding sync point and earlier frames are returned too).
+// Same clock-carrier contract as frameAtOrAfter: pts values live in info.timeBase.
+export async function decodePresentedWindow(options: {
+  source: SourceFile; info: MediaInfo; executable: string; signal: AbortSignal; count: number; fromUs?: number;
+}): Promise<PresentedFrame[]> {
+  const { source, info, executable, signal } = options;
+  if (!Number.isSafeInteger(options.count) || options.count < 1 || options.count > 4096) throw new Error('Invalid frame window size');
+  const fromUs = options.fromUs ?? 0;
+  if (!Number.isSafeInteger(fromUs) || fromUs < 0 || fromUs >= info.durationUs) throw new Error('Invalid frame window origin');
+  await assertSource(source); signal.throwIfAborted();
+  const frames: PresentedFrame[] = []; let clockSeen = false;
+  await streamProcessLines(executable, ['-hide_banner', '-v', 'error', '-nostdin', '-xerror', '-protocol_whitelist', 'file,pipe',
+    '-err_detect', 'explode', '-copyts', '-noautorotate',
+    ...(fromUs > 0 ? ['-seek_timestamp', '1', '-ss', usToSeconds(info.startUs + fromUs), '-noaccurate_seek'] : []),
+    '-i', source.path, '-map', `0:${info.videoIndex}`, '-an', '-vf', `settb=${info.timeBase.numerator}/${info.timeBase.denominator}`,
+    '-c:v', 'wrapped_avframe', '-enc_time_base:v', 'filter', '-fps_mode', 'passthrough', '-frames:v', String(options.count),
+    '-map_metadata', '-1', '-map_metadata:s', '-1', '-map_chapters', '-1', '-f', 'framehash', '-hash', 'sha256', '-'], line => {
+    signal.throwIfAborted();
+    const clock = /^#tb 0:\s*(\d+\/\d+)$/.exec(line);
+    if (clock) {
+      const base = parseRational(clock[1]);
+      if (!base || BigInt(base.numerator) * BigInt(info.timeBase.denominator) !== BigInt(info.timeBase.numerator) * BigInt(base.denominator))
+        throw new Error('Unexpected decoded frame time base');
+      clockSeen = true;
+    }
+    const frame = parsePresentedFrame(line, 0); if (!frame) return;
+    if (!clockSeen) throw new Error('Missing decoded frame time base');
+    if (frames.length && frame.pts <= frames.at(-1)!.pts) throw new Error('视频呈现时间不递增，无法建立局部帧窗口。');
+    frames.push(frame);
+  }, { signal, timeoutMs: 15000 });
+  return frames;
 }
 
 export async function planEncodeRange(source: SourceFile, probe: MediaProbe, requested: ClipSelection,

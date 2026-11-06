@@ -38,18 +38,15 @@ export function App() {
   const labels = { running: '检查中', cancelling: '正在取消', completed: '自检通过', cancelled: '已取消', failed: '自检失败' };
   return <main className="app-shell">
     <header className="app-header">
-      <div className="brand"><span className="brand-mark" aria-hidden="true">M<span>•</span></span><h1>实况工坊</h1><span className="workspace-label">视频工作区</span></div>
-      <div className="header-tools"><span className="local-label">本地处理</span>
+      <div className="brand"><span className="brand-mark" aria-hidden="true">M<span>•</span></span><h1>实况工坊</h1></div>
+      <div id="editor-toolbar" className="editor-toolbar" />
+      <div className="header-tools">
         <button className="quiet-button" aria-label="帮助与检查" onClick={() => support.current?.showModal()}>帮助与检查</button></div>
     </header>
     {error && <p role="alert" className="error app-alert">{error}</p>}
     {snapshot?.engines.error && <p role="alert" className="error app-alert">{snapshot.engines.error.message}</p>}
     {snapshot?.previewEngine.error && <p role="alert" className="error app-alert">{snapshot.previewEngine.error.message}</p>}
     {snapshot?.startupWarnings.map((warning, index) => <p key={index} className="warning app-alert">{warning}</p>)}
-    {Boolean(snapshot?.cleanupIssues.length) && <details className="warning app-alert" data-testid="cleanup-notice">
-      <summary>缓存检查：保留了 {snapshot!.cleanupIssues.length} 项待核查记录</summary>
-      <p>旧缓存不会被当作原片重新加载。记录未被静默忽略；请在“帮助与检查”查看目录标识与保留原因。</p>
-    </details>}
     {preparing && <aside data-testid="startup-status" className="startup-status" role="status" aria-live="polite">
       <strong>{ready && !previewReady ? '正在校验原生预览引擎…' : startupMessage(snapshot?.engines.check)}</strong>
       <p>正在校验本地媒体引擎，完成后自动启用导入。不会联网；首次启动或慢速磁盘可能需要稍候。</p>
@@ -76,9 +73,9 @@ export function App() {
       </details>
       <details data-testid="cleanup-details" className="diagnostics"><summary>缓存恢复记录（{snapshot?.cleanupIssues.length ?? 0}）</summary>
         {!snapshot?.cleanupIssues.length ? <p className="hint">没有待处理的缓存恢复记录。</p> : <>
-          <p className="hint">这些条目没有自动删除。已验证的占用/权限问题会在下次启动重试；缺少或损坏标记的历史目录不会被认领。</p>
+          <p className="hint">临时缓存会在关闭后清理，未成功的会在下次启动重试。旧任务不会恢复；原视频和已导出的照片不受影响。</p>
           <ul>{snapshot.cleanupIssues.map(issue => <li key={`${issue.area}/${issue.directory}`}>
-            <code>{issue.area}/{issue.directory}</code><p>{issue.message}。{issue.retryable ? '可在关闭占用程序后重启应用重试。' : '需人工核查，不能补造所有权标记。'}</p>
+            <code>{issue.area}/{issue.directory}</code><p>{issue.message}。{issue.retryable ? '可在关闭占用程序后重启应用重试。' : '路径异常，未执行递归删除。'}</p>
           </li>)}</ul>
         </>}
         <p className="hint">默认数据目录：%APPDATA%\Motion Photo Studio（测试或部署覆盖时以配置目录为准）。请先核对原片与成品，单独确认目标目录后再处理，不要批量删除。</p>
