@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 export function releasePlan({ version, lockVersion, rootVersion, previousVersion, event, refType, refName, publish = false, notes }) {
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw new Error('Release version must be X.Y.Z');
   if (lockVersion !== version || rootVersion !== version) throw new Error('package-lock versions must match package.json');
-  if (typeof notes !== 'string' || notes.trim().length < 100 || !notes.startsWith(`# Motion Photo Studio v${version}\n`)) throw new Error('Missing detailed version-specific release notes');
+  // Windows checkout may convert LF to CRLF; line endings are not release content.
+  const normalizedNotes = typeof notes === 'string' ? notes.replace(/\r\n/g, '\n') : '';
+  if (normalizedNotes.trim().length < 100 || !normalizedNotes.startsWith(`# Motion Photo Studio v${version}\n`)) throw new Error('Missing detailed version-specific release notes');
   const tag = `v${version}`;
   if (refType === 'tag' && refName !== tag) throw new Error('Tag/version mismatch');
   const changed = event === 'push' && refType === 'branch' && refName === 'main' && previousVersion !== null && previousVersion !== version;
