@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, cp, readdir, lstat } from 'node:fs/promises
 import { resolve, join, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { sharpWindowsSource } from './package-source.mjs';
+import { sharpWindowsSource, verifyPinnedNotice } from './package-source.mjs';
 
 const root = resolve(process.argv[2] || '../artifacts/release-engine');
 const repos = join(root, 'repos'), sources = join(root, 'sources'), licenses = join(root, 'bundle/licenses');
@@ -11,6 +11,13 @@ const lock = JSON.parse(await readFile('release/sources.json', 'utf8'));
 const run = (file, args, cwd) => execFileSync(file, args, { cwd, stdio: 'inherit' });
 const capture = (file, args, cwd) => execFileSync(file, args, { cwd, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
 await Promise.all([repos, sources, licenses].map(path => mkdir(path, { recursive: true })));
+await mkdir(join(licenses, 'toolchain'), { recursive: true });
+for (const notice of lock.vendoredNotices) {
+  if (basename(notice.file) !== notice.file) throw new Error('Invalid notice filename');
+  const bytes = await readFile(join('release/licenses', notice.file));
+  verifyPinnedNotice(notice, bytes);
+  await writeFile(join(licenses, 'toolchain', notice.file), bytes);
+}
 for (const item of [...lock.engine, ...lock.imageSources]) {
   if (!/^[\w-]+\/[\w.-]+$/.test(item.repo) || !/^[a-f0-9]{40}$/.test(item.commit) || !/^[\w-]+$/.test(item.name)) throw new Error('Invalid source pin');
   const dir = join(repos, item.name);

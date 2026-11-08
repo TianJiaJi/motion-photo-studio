@@ -10,6 +10,18 @@ export SOURCE_DATE_EPOCH="$(git -C "$repos/ffmpeg" show -s --format=%ct HEAD)"
 jobs="${BUILD_JOBS:-2}"
 cross=x86_64-w64-mingw32
 
+# Verify all required toolchain notices exist before expensive compilation; no late downloads.
+mkdir -p "$root/bundle/licenses/toolchain"
+for notice in /usr/share/doc/gcc*/copyright /usr/share/doc/g++*/copyright /usr/share/doc/mingw*/copyright; do
+  if [ -f "$notice" ]; then
+    parent="${notice%/copyright}"; cp -L "$notice" "$root/bundle/licenses/toolchain/${parent##*/}-copyright.txt"
+  fi
+done
+cp /usr/share/common-licenses/GPL-3 /usr/share/common-licenses/LGPL-3 /usr/share/common-licenses/LGPL-2.1 "$root/bundle/licenses/toolchain/"
+if [ ! -s "$root/bundle/licenses/toolchain/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt" ]; then
+  echo "Missing preverified GCC runtime exception notice" >&2; exit 1
+fi
+
 (cd "$repos/zlib"; make -f win32/Makefile.gcc -j"$jobs" PREFIX="$cross-" libz.a)
 cp "$repos/zlib/libz.a" "$prefix/lib/"
 cp "$repos/zlib/zlib.h" "$repos/zlib/zconf.h" "$prefix/include/"
@@ -57,15 +69,6 @@ cp "$repos/ffmpeg/ffbuild/config.mak" "$root/sources/ffmpeg-config.mak"
 cp "$repos/ffmpeg/config.h" "$root/sources/ffmpeg-config.h"
 printf '%s\n' "$("$cross-gcc" --version | head -1)" "$(cmake --version | head -1)" "$(nasm -v)" > "$root/sources/BUILD-TOOLS.txt"
 cp "$root/sources/SOURCE-PINS.json" "$root/bundle/licenses/ENGINE-SOURCE-PINS.json"
-mkdir -p "$root/bundle/licenses/toolchain"
-for notice in /usr/share/doc/gcc*/copyright /usr/share/doc/g++*/copyright /usr/share/doc/mingw*/copyright; do
-  if [ -f "$notice" ]; then
-    parent="${notice%/copyright}"; cp -L "$notice" "$root/bundle/licenses/toolchain/${parent##*/}-copyright.txt"
-  fi
-done
-cp /usr/share/common-licenses/GPL-3 /usr/share/common-licenses/LGPL-3 /usr/share/common-licenses/LGPL-2.1 "$root/bundle/licenses/toolchain/"
-curl --fail --location --retry 3 https://www.gnu.org/licenses/gcc-exception-3.1.txt -o "$root/bundle/licenses/toolchain/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt"
-grep -q 'GCC RUNTIME LIBRARY EXCEPTION' "$root/bundle/licenses/toolchain/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt"
 cp -R "$root/bundle/licenses/toolchain" "$root/sources/toolchain-notices"
 # Sources are separate release attachments, not runtime dependencies or fake tiny link files.
 version="$(node -p "require('./package.json').version")"

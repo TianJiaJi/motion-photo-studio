@@ -18,6 +18,10 @@ The upstream build-win64-mxe build.sh documents rebuilding the x86_64 web/static
 
 LGPL-covered libraries remain replaceable DLLs under resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/. Keep the expected ABI/file names; rebuild the wrapper/binding from the provided sharp sources if needed. No application licensing notice restricts modification, replacement or reverse engineering needed to debug modifications to LGPL components. Third-party licenses and rights remain separate from the application's own copyright.
 
+## Toolchain notices
+
+GCC/MinGW package copyright notices and the GCC Runtime Library Exception 3.1 accompany the binaries and source attachment under toolchain notices. The exception is vendored verbatim from GCC's pinned COPYING.RUNTIME; SOURCE-PINS.json records its upstream commit URL, Git blob ID and SHA256. Source preparation verifies both hashes before compilation. It is not downloaded from a mutable website after compiling. This notice's GCC source snapshot identifies the license text, not the compiler binary version; BUILD-TOOLS.txt records the actual compiler used.
+
 ## Other components
 
 Electron's LICENSE and LICENSES.chromium.html accompany its runtime. Rust dependency/toolchain notices accompany the native helper under resources/licenses/native-preview. JavaScript dependencies retain their bundled package licenses. This collection records technical provenance and source availability; it is not a legal certification, codec patent license, clean-machine certification or phone-compatibility guarantee.

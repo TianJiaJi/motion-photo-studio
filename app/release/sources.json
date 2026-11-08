@@ -13,6 +13,14 @@
     { "name": "vips-build", "repo": "libvips/build-win64-mxe", "commit": "ef19ca09af2453d127453d677c849ccb37cf5694", "version": "8.18.7" },
     { "name": "mxe", "repo": "kleisauke/mxe", "commit": "c36160b231e66e1cbe032ed54aef7617e8b259da" }
   ],
+  "vendoredNotices": [
+    {
+      "file": "GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt",
+      "source": "https://github.com/gcc-mirror/gcc/blob/b71f1de6e9cf7181a288c0f39f9b1ef6580cf5c8/COPYING.RUNTIME",
+      "gitBlob": "e1b3c69c179dfaff5744ea4bf853e6b0d90c9ef9",
+      "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+    }
+  ],
   "vipsBinary": {
     "url": "https://github.com/libvips/build-win64-mxe/releases/download/v8.18.7/vips-dev-x64-web-8.18.7-static.zip",
     "sha256": "a736af61d3b46499760efa606e469cb14e060445b1f6fd36a1fa2e75009e1197"

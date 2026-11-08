@@ -1,0 +1,4 @@
+# Preserve the exact, hash-pinned upstream notice bytes on every checkout.
+app/release/licenses/*.txt text eol=lf
+# Upstream COPYING.RUNTIME ends with a blank line; preserve its verified bytes.
+app/release/licenses/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt whitespace=-blank-at-eof
