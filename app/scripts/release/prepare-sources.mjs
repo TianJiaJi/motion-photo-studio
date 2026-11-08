@@ -18,7 +18,18 @@ for (const item of [...lock.engine, ...lock.imageSources]) {
   run('git', ['-c', 'credential.helper=', 'fetch', '--depth=1', `https://github.com/${item.repo}.git`, item.commit], dir);
   run('git', ['checkout', '--detach', '--quiet', 'FETCH_HEAD'], dir);
   if (capture('git', ['rev-parse', 'HEAD'], dir).trim() !== item.commit) throw new Error('Source commit mismatch');
-  run('git', ['archive', '--format=tar.gz', `--output=${join(sources, `${item.name}-${item.commit}.tar.gz`)}`, 'HEAD'], dir);
+  if (item.tag) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(item.tag)) throw new Error('Invalid source tag');
+    run('git', ['-c', 'credential.helper=', 'fetch', '--depth=1', `https://github.com/${item.repo}.git`, `refs/tags/${item.tag}:refs/tags/${item.tag}`], dir);
+    if (capture('git', ['rev-parse', `refs/tags/${item.tag}^{commit}`], dir).trim() !== item.commit) throw new Error('Source tag moved away from pinned commit');
+  }
+  const archive = join(sources, `${item.name}-${item.commit}.tar.gz`);
+  if (item.name === 'x265') {
+    if (item.tag !== item.version) throw new Error('x265 needs its exact checked release tag');
+    // Upstream Version.cmake consumes this file when rebuilding a source archive without .git.
+    await writeFile(join(dir, 'x265Version.txt'), `releasetag: ${item.tag}\nreleasetagdistance: 0\nrepositorychangeset: ${item.commit}\n`);
+    run('tar', ['--exclude=.git', '-czf', archive, '-C', dir, '.']);
+  } else run('git', ['archive', '--format=tar.gz', `--output=${archive}`, 'HEAD'], dir);
 }
 await cp('release/sources.json', join(sources, 'SOURCE-PINS.json'));
 await cp('scripts/release/build-engine.sh', join(sources, 'build-engine.sh'));
