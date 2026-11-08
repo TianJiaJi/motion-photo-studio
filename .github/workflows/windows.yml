@@ -5,16 +5,95 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the current version after all gates (retry an unpublished version)
+        type: boolean
+        default: false
 permissions:
   contents: read
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      prepare: ${{ steps.version.outputs.prepare }}
+      release: ${{ steps.version.outputs.release }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      notesPath: ${{ steps.version.outputs.notesPath }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.0'
+      - id: version
+        name: Validate versions and detailed release notes
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          PUBLISH_RELEASE: ${{ inputs.publish || false }}
+        run: node app/scripts/release/plan.mjs
+  engine:
+    needs: plan
+    if: needs.plan.outputs.prepare == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.11.0'
+      - name: Install source build and source-collection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 nasm cmake autoconf automake libtool pkg-config curl unzip xz-utils make g++ ruby python-is-python3 p7zip-full lzip
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+      - name: Collect pinned sources, licenses, patches and image dependency provenance
+        working-directory: app
+        run: node scripts/release/prepare-sources.mjs
+      - name: Cross-build Windows media engines and corresponding source archive
+        working-directory: app
+        run: |
+          bash scripts/release/build-engine.sh
+          node scripts/release/engine-artifact.mjs seal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-built-engine-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/release-engine/bundle/
+            artifacts/release-engine/BUILD-MANIFEST.json
+            artifacts/release-engine/*-third-party-sources.tar.gz
+          if-no-files-found: error
+      - name: Retain source-build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-failure-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            artifacts/release-engine/repos/ffmpeg/ffbuild/config.log
+            artifacts/release-engine/source-metadata.mk
+            artifacts/release-engine/repos/mxe/log/
+            artifacts/release-engine/x265-*/CMakeFiles/CMake*.log
+          if-no-files-found: ignore
   build:
+    needs: [plan, engine]
+    if: always() && !cancelled() && needs.plan.result == 'success' && (needs.engine.result == 'success' || needs.engine.result == 'skipped')
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
       run:
         working-directory: app
         shell: pwsh
+    env:
+      PLAYWRIGHT_HTML_OPEN: never
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,15 +103,6 @@ jobs:
           node-version: '24.11.0'
           cache: npm
           cache-dependency-path: app/package-lock.json
-      - name: Verify version tag
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          if ($env:REF_TYPE -eq 'tag') {
-            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-            if ($env:REF_NAME -cne "v$version") { throw 'Tag must equal v + package.json version' }
-          }
       - run: npm ci --include=dev
       - name: Install pinned Windows Rust toolchain
         run: |
@@ -45,54 +115,47 @@ jobs:
         run: npm run build:preview-engine
       - run: npm run typecheck
       - run: npm run test:unit
-      - name: Compile application code (FFmpeg bundle not required)
+      - name: Compile application code
         run: npx electron-vite build
       - uses: actions/upload-artifact@v4
         with:
           name: application-code-${{ github.run_id }}-${{ github.sha }}
           path: app/out/
           if-no-files-found: error
-      - name: Require reviewed engine for complete portable ZIP
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        env:
-          ENGINE_URL: ${{ vars.ENGINE_BUNDLE_URL }}
-          ENGINE_SHA256: ${{ vars.ENGINE_BUNDLE_SHA256 }}
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.prepare == 'true'
+        with:
+          name: source-built-engine-${{ github.run_id }}-${{ github.sha }}
+          path: artifacts/release-engine
+      - name: Verify exact source-built engine and image provenance
+        if: needs.plan.outputs.prepare == 'true'
         run: |
-          if (!$env:ENGINE_URL -or $env:ENGINE_SHA256 -notmatch '^[a-fA-F0-9]{64}$') {
-            throw 'Portable ZIP blocked: configure reviewed ENGINE_BUNDLE_URL and ENGINE_BUNDLE_SHA256. See docs/github-builds.md. Compiled application code is not a runnable portable distribution.'
-          }
-          if (([uri]$env:ENGINE_URL).Scheme -ne 'https') { throw 'Engine URL must use HTTPS' }
-          Invoke-WebRequest $env:ENGINE_URL -OutFile engine.zip
-          if ((Get-FileHash engine.zip -Algorithm SHA256).Hash -ine $env:ENGINE_SHA256) { throw 'Engine archive hash mismatch' }
-          Expand-Archive engine.zip -DestinationPath resources -Force
-          npm run check:engine
-          if ($LASTEXITCODE -ne 0) { throw 'Engine verification failed' }
-          # Never trust a preview helper from the FFmpeg archive: restore our locked local build.
-          npm run build:preview-engine
-          if ($LASTEXITCODE -ne 0) { throw 'Native preview build failed' }
+          node scripts/release/engine-artifact.mjs install
+          if ($LASTEXITCODE -ne 0) { throw 'Engine/source artifact verification failed' }
           npm run build
           if ($LASTEXITCODE -ne 0) { throw 'Complete engine/application verification failed' }
       - name: Media integration tests
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        if: needs.plan.outputs.prepare == 'true'
         run: |
           $env:FFMPEG_PATH = "$PWD/resources/bin/ffmpeg.exe"
           $env:FFPROBE_PATH = "$PWD/resources/bin/ffprobe.exe"
           npm run test:integration
+          if ($LASTEXITCODE -ne 0) { throw 'Media integration tests failed' }
       - name: Package unsigned Windows x64 portable ZIP
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        if: needs.plan.outputs.prepare == 'true'
         run: |
           npx electron-builder --win zip --x64 --publish never
           if ($LASTEXITCODE -ne 0) { throw 'Portable packaging failed' }
           node scripts/check-package-resources.ts ../artifacts/desktop/win-unpacked/resources
-          if ($LASTEXITCODE -ne 0) { throw 'Packaged native/media resources or license inventory failed verification' }
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged resource verification failed' }
       - name: Test exact packaged application
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        if: needs.plan.outputs.prepare == 'true'
         run: |
           $env:MOTION_PACKAGED_EXE = (Resolve-Path '../artifacts/desktop/win-unpacked/Motion Photo Studio.exe').Path
-          npx playwright test tests/e2e/desktop.spec.ts tests/e2e/native-preview.spec.ts tests/e2e/native-lifecycle.spec.ts tests/e2e/cleanup.spec.ts tests/e2e/editor.spec.ts tests/e2e/preview-buffer.spec.ts tests/e2e/audio-choice.spec.ts tests/e2e/startup.spec.ts tests/e2e/export-feedback.spec.ts tests/e2e/export.spec.ts tests/e2e/save.spec.ts --workers=1 --grep-invert "missing engine package"
+          npx playwright test --workers=1 --grep-invert "missing engine package"
           if ($LASTEXITCODE -ne 0) { throw 'Packaged desktop tests failed' }
           node scripts/verify-packaged-preview-faults.ts $env:MOTION_PACKAGED_EXE
-          if ($LASTEXITCODE -ne 0) { throw 'Isolated packaged native-engine fault tests failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged native-engine fault tests failed' }
       - name: Retain test failure evidence
         if: failure()
         uses: actions/upload-artifact@v4
@@ -102,37 +165,52 @@ jobs:
             app/test-results/
             app/playwright-report/
           if-no-files-found: ignore
-      - name: Portable ZIP checksums
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+      - name: Release attachment checksums
+        if: needs.plan.outputs.prepare == 'true'
         run: |
-          Get-ChildItem ../artifacts/desktop/*-portable.zip | ForEach-Object {
+          Get-ChildItem ../artifacts/desktop/*-portable.zip,../artifacts/desktop/*-third-party-sources.tar.gz,../artifacts/desktop/ENGINE-BUILD-MANIFEST.json | Sort-Object Name | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content ../artifacts/desktop/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        if: needs.plan.outputs.prepare == 'true'
         with:
           name: windows-x64-portable-${{ github.run_id }}-${{ github.sha }}
           path: |
             artifacts/desktop/*-portable.zip
+            artifacts/desktop/*-third-party-sources.tar.gz
+            artifacts/desktop/ENGINE-BUILD-MANIFEST.json
             artifacts/desktop/SHA256SUMS.txt
           if-no-files-found: error
   release:
-    if: github.ref_type == 'tag'
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [plan, build]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: windows-x64-portable-${{ github.run_id }}-${{ github.sha }}
           path: release
-      - name: Publish portable preview
+      - name: Publish versioned portable preview with detailed notes
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION_TAG: ${{ github.ref_name }}
+          VERSION_TAG: ${{ needs.plan.outputs.tag }}
+          NOTES_PATH: ${{ needs.plan.outputs.notesPath }}
+        shell: bash
         run: |
-          gh release create "$VERSION_TAG" release/*-portable.zip release/SHA256SUMS.txt \
-            --verify-tag --prerelease --title "Motion Photo Studio $VERSION_TAG (Windows portable preview)" \
-            --notes "Windows x64 unsigned portable ZIP. Extract the complete archive and run Motion Photo Studio.exe. Includes native engines. Phone compatibility and clean offline environment acceptance remain incomplete. This is a development preview, not an installer."
+          set -euo pipefail
+          (cd release && sha256sum --check SHA256SUMS.txt)
+          test -s "$NOTES_PATH"
+          # Create the tag only after every gate passes; never move an existing tag.
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION_TAG" >/dev/null; then
+            test "$(git ls-remote --tags origin "refs/tags/$VERSION_TAG" | cut -f1)" = "$GITHUB_SHA"
+          else
+            gh api "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$VERSION_TAG" -f "sha=$GITHUB_SHA"
+          fi
+          gh release create "$VERSION_TAG" release/*-portable.zip release/*-third-party-sources.tar.gz release/ENGINE-BUILD-MANIFEST.json release/SHA256SUMS.txt \
+            --verify-tag --prerelease --title "Motion Photo Studio $VERSION_TAG — Windows 免安装预览版" --notes-file "$NOTES_PATH"

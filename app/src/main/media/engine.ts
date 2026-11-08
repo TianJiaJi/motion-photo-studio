@@ -8,7 +8,7 @@ import type { EngineCheckProgress } from '../../shared/contracts.ts';
 export type EngineManifest = {
   schemaVersion: 1; platform: 'win32'; arch: 'x64'; build: string;
   binaries: { name: 'ffmpeg.exe' | 'ffprobe.exe'; sha256: string; size: number }[];
-  provenance: string; releaseStatus: 'internal-development-only';
+  provenance: string; releaseStatus: 'internal-development-only' | 'public-preview';
 };
 export type EnginePaths = { ffmpeg: string; ffprobe: string; build: string };
 export function parseEngineManifest(raw: unknown): EngineManifest {
@@ -20,7 +20,7 @@ export function parseEngineManifest(raw: unknown): EngineManifest {
     || new Set(m.binaries.map(b => b?.name)).size !== 2
     || m.binaries.some(b => !b || !['ffmpeg.exe', 'ffprobe.exe'].includes(b.name)
       || !/^[a-f0-9]{64}$/.test(b.sha256) || !Number.isSafeInteger(b.size) || b.size <= 0)
-    || m.releaseStatus !== 'internal-development-only' || typeof m.provenance !== 'string') {
+    || !['internal-development-only', 'public-preview'].includes(m.releaseStatus ?? '') || typeof m.provenance !== 'string') {
     throw new Error('Invalid engine manifest');
   }
   return m as EngineManifest;

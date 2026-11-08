@@ -1,6 +1,6 @@
 appId: local.motionphotostudio.desktop
 productName: Motion Photo Studio
-copyright: Internal development build — not for public redistribution
+copyright: Copyright TianJiaJi. Third-party components retain their own licenses.
 asar: true
 asarUnpack:
   - node_modules/@img/sharp-win32-x64/**/*

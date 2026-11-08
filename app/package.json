@@ -1,7 +1,7 @@
 {
   "name": "android-motion-photo",
-  "version": "0.1.4",
-  "description": "Offline Windows Motion Photo Studio — internal development build",
+  "version": "0.1.5",
+  "description": "Offline Windows Motion Photo Studio — preview release",
   "author": "Motion Photo Studio",
   "license": "UNLICENSED",
   "private": true,

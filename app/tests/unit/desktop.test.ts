@@ -40,6 +40,8 @@ test('engine manifest rejects traversal, duplicates and unbounded sizes', () => 
   const good = { schemaVersion: 1, platform: 'win32', arch: 'x64', build: 'test', releaseStatus: 'internal-development-only',
     provenance: 'fixture', binaries: [{ name: 'ffmpeg.exe', sha256: 'a'.repeat(64), size: 123 }, { name: 'ffprobe.exe', sha256: 'b'.repeat(64), size: 123 }] };
   assert.equal(parseEngineManifest(good).build, 'test');
+  assert.equal(parseEngineManifest({ ...good, releaseStatus: 'public-preview' }).build, 'test');
+  assert.throws(() => parseEngineManifest({ ...good, releaseStatus: 'unknown' }));
   assert.throws(() => parseEngineManifest({ ...good, binaries: [good.binaries[0], good.binaries[0]] }));
   assert.throws(() => parseEngineManifest({ ...good, binaries: [{ ...good.binaries[0], name: '../engine.exe' }, good.binaries[1]] }));
   assert.throws(() => parseEngineManifest({ ...good, binaries: [{ ...good.binaries[0], size: 2 ** 54 }, good.binaries[1]] }));
