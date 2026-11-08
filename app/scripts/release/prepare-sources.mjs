@@ -3,6 +3,7 @@ import { readFile, writeFile, mkdir, cp, readdir, lstat } from 'node:fs/promises
 import { resolve, join, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { sharpWindowsSource } from './package-source.mjs';
 
 const root = resolve(process.argv[2] || '../artifacts/release-engine');
 const repos = join(root, 'repos'), sources = join(root, 'sources'), licenses = join(root, 'bundle/licenses');
@@ -22,6 +23,7 @@ for (const item of [...lock.engine, ...lock.imageSources]) {
 await cp('release/sources.json', join(sources, 'SOURCE-PINS.json'));
 await cp('scripts/release/build-engine.sh', join(sources, 'build-engine.sh'));
 await cp('scripts/release/prepare-sources.mjs', join(sources, 'prepare-sources.mjs'));
+await cp('scripts/release/package-source.mjs', join(sources, 'package-source.mjs'));
 await cp('release/SOURCE-README.md', join(sources, 'README.md'));
 for (const item of lock.engine) {
   for (const file of await readdir(join(repos, item.name))) {
@@ -36,11 +38,11 @@ await cp(join(repos, 'sharp/LICENSE'), join(licenses, 'SHARP-LICENSE'));
 const npmLock = JSON.parse(await readFile('package-lock.json', 'utf8'));
 const pkg = npmLock.packages['node_modules/@img/sharp-win32-x64'];
 const sharpPin = lock.imageSources.find(item => item.name === 'sharp');
-if (pkg.version !== sharpPin.version || !/^sha512-[A-Za-z0-9+/=]+$/.test(pkg.integrity) || !pkg.resolved.startsWith('https://registry.npmjs.org/')) throw new Error('Sharp source/npm pin mismatch');
+const canonical = sharpWindowsSource(pkg, sharpPin.version);
 const sharpTar = join(root, 'sharp-win32.tgz');
-run('curl', ['--fail', '--location', '--retry', '3', '--output', sharpTar, pkg.resolved]);
+run('curl', ['--fail', '--location', '--retry', '3', '--output', sharpTar, canonical.url]);
 const npmHash = createHash('sha512').update(await readFile(sharpTar)).digest('base64');
-if (`sha512-${npmHash}` !== pkg.integrity) throw new Error('Sharp npm integrity mismatch');
+if (`sha512-${npmHash}` !== canonical.integrity) throw new Error('Sharp npm integrity mismatch');
 const sharpPackage = join(root, 'sharp-package'); await mkdir(sharpPackage);
 run('tar', ['xzf', sharpTar, '--strip-components=1', '-C', sharpPackage]);
 const versions = JSON.parse(await readFile(join(sharpPackage, 'versions.json'), 'utf8'));
