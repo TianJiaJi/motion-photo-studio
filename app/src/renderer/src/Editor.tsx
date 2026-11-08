@@ -5,7 +5,7 @@ import type { VideoAsset, Thumbnail, CoverAsset } from '../../shared/media.ts';
 import type { PreviewReady, PreviewStamp, PreviewBoundary } from '../../shared/native-preview.ts';
 import { PreviewController } from './preview-controller.ts';
 import { PreviewSurface, type PreviewSurfaceHandle } from './PreviewSurface.tsx';
-import { cropToPixels, formatTime, parseTime, validateClip, createClip, clipSelectionAt, MAX_CLIPS } from '../../shared/editor.ts';
+import { centeredAspectCrop, clipSelectionWithDuration, parseClipDurationSeconds, cropToPixels, formatTime, parseTime, validateClip, createClip, clipSelectionAt, MAX_CLIPS } from '../../shared/editor.ts';
 import type { CropRect, ClipSelection, ExportSettings, ClipModel } from '../../shared/editor.ts';
 import type { ClipReference } from '../../shared/media-ipc.ts';
 import type { ProcessingState } from '../../shared/processing.ts';
@@ -127,6 +127,8 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
   const exportPreviewClip = exportClips.find(item => item.id === exportPreviewId) ?? exportClips.find(item => item.id === activeClipId) ?? exportClips[0] ?? activeClip;
   const playbackSelection = outputOpen ? exportPreviewClip.selection : clip;
   const exportInterval = useRef<ClipSelection | null>(null); exportInterval.current = outputOpen ? exportPreviewClip.selection : null;
+  const [batchDuration, setBatchDuration] = useState('3');
+  const batchDurationUs = parseClipDurationSeconds(batchDuration);
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null);
   const batchRef = useRef('');
   const [hdrConsent, setHdrConsent] = useState(false);
@@ -332,6 +334,35 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
   function changeClip(next: ClipSelection, id = activeClipRef.current) {
     try { updateClip({ selection: validateClip(next, duration) }, id); setError(''); } catch (e) { report(e); }
   }
+  function trimAtPlayhead(kind: 'start' | 'end') {
+    if (blocked || !previewAvailable || !frame) return;
+    const at = playIntent.current ? displayed.current : position;
+    try {
+      const next = validateClip({ ...clip, ...(kind === 'start' ? { startUs: at } : { endUs: at }) }, duration);
+      changeClip(next); interact({ kind, phase: 'keyboard', timeUs: at });
+    } catch (e) { report(e); }
+  }
+  function applyAspect(aspect: number | null) {
+    if (blocked || copyMode || !asset) return;
+    pause();
+    updateClip({ crop: aspect === null ? { ...fullCrop } : centeredAspectCrop(asset.info.displayWidth, asset.info.displayHeight, aspect), cropLocked: aspect === null });
+  }
+  function uniformDuration() {
+    if (blocked || !asset || batchDurationUs === null) return;
+    pause();
+    const next = clipsRef.current.map(item => ({ ...item, revision: item.revision + 1, selection: clipSelectionWithDuration(item.selection, duration, batchDurationUs) }));
+    commitClips(next);
+    const short = next.filter(item => item.selection.endUs - item.selection.startUs < batchDurationUs).length;
+    const seconds = batchDurationUs / 1e6;
+    setError(''); setNotice(`已按 ${seconds} 秒调整 ${next.length} 段，起点保持不变。${short ? `其中 ${short} 段距片尾不足 ${seconds} 秒，保留剩余时长。` : `每段均为 ${seconds} 秒。`}`);
+  }
+  function syncCurrentCrop() {
+    if (blocked || copyMode || clipsRef.current.length < 2) return;
+    pause();
+    const current = clipsRef.current.find(item => item.id === activeClipRef.current)!;
+    commitClips(clipsRef.current.map(item => item.id === current.id ? item : { ...item, revision: item.revision + 1, crop: { ...current.crop }, cropLocked: current.cropLocked }));
+    setError(''); setNotice(`已将当前裁剪应用到全部 ${clipsRef.current.length} 段，封面和选段时间不变。`);
+  }
   function activateClip(id: string) {
     if (id === activeClipRef.current) return;
     pause(); activeClipRef.current = id; setActiveClipId(id); setOutputOpen(false);
@@ -378,9 +409,9 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
     const keydown = (event: KeyboardEvent) => {
       if (event.code !== 'Space' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing || event.defaultPrevented) return;
       const element = event.target instanceof Element ? event.target : null;
-      if (element?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="slider"], summary, a')) return;
+      if (element?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="slider"]:not([data-playback-shortcut]), summary, a')) return;
       // Space is the transport shortcut even after clicking an editor command.
-      // Enter still activates focused buttons; text/checkbox/select/slider inputs keep their native keys.
+      // Timeline handles use Space for transport, arrows for editing; ordinary form sliders keep native keys.
       const modal = document.querySelector('dialog[open]');
       if (modal && modal !== draftDialog.current) return;
       if (!asset) return;
@@ -452,7 +483,7 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
           {audio && asset.info.audioTracks.length > 1 && <label className="field">保留音轨<select aria-label="所保留的音轨" disabled={blocked} value={audioIndex ?? ''} onChange={e => { pause(); changeShared(() => setAudioIndex(e.target.value === '' ? null : Number(e.target.value))); }}><option value="" disabled>请选择音轨 · 不会自动丢轨</option>{asset.info.audioTracks.map(track => <option key={track.index} value={track.index}>轨道 {track.index} · {track.codec} · {track.channels ?? '?'} 声道</option>)}</select></label>}
 </>;
   const outputSettings = (<section className="panel"><h3>输出设置</h3>
-          {outputOpen && <div className="export-audio-controls">{audioControls}</div>}
+          {outputOpen && <div className="export-audio-controls">{audioControls}{!asset.info.hasAudio && <p className="hint">原视频没有音轨</p>}</div>}
           <label className="check mode-switch"><input type="checkbox" aria-label="原画质（跟随原片）" data-testid="source-matching" checked={copyMode} disabled={blocked} onChange={e => { pause(); setProcessing(previous => setProcessingMode(previous, e.target.checked ? 'copy' : 'encode')); }} />原画质（跟随原片）</label>
           {copyMode && <p className="hint">保留原片规格，不应用裁剪；兼容编码，非无损。</p>}
           <label className="field">输出帧率<select aria-label="输出帧率" disabled={blocked || copyMode} value={settings.fps ?? 'original'} onChange={e => setSettings({ ...settings, fps: e.target.value === 'original' ? null : Number(e.target.value) })}><option value="original">保持原片</option>{[24, 25, 30, 50, 60, 120].map(fps => <option key={fps} value={fps}>{fps} fps</option>)}</select></label>
@@ -481,7 +512,7 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
         {nativeReady?.warnings.length ? <details className="hint"><summary>预览处理说明</summary>{nativeReady.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</details> : null}
         <CropStage width={asset.info.displayWidth} height={asset.info.displayHeight} crop={visibleCrop} locked={locked} disabled={blocked || copyMode} showOverlay={!copyMode} onChange={setCrop} onEdit={pause}>
           {!outputOpen && <PreviewSurface key={asset.id} ref={surface} controller={controller} enabled={previewAvailable && compatible} />}
-          {!previewAvailable && compatible && <div className="preview-buffering" role="status">{audioChoicePending ? '请选择要预览的音轨，或明确关闭音轨；确认后一起准备画面与声音。' : nativePreparing ? nativeProgress : '请准备预览或重新导入素材'}</div>}
+          {!previewAvailable && compatible && <div className={`preview-buffering${audioChoicePending ? ' needs-audio' : ''}`} role="status">{audioChoicePending ? <div className="preview-audio-choice"><p>此视频包含多条音轨，请先确认预览声音。</p><button disabled={blocked} onPointerDown={e => e.stopPropagation()} onClick={exportMotion}>前往导出设置选择音轨</button></div> : nativePreparing ? nativeProgress : '请准备预览或重新导入素材'}</div>}
           {!compatible && <div className="stage-message">请先确认 HDR 转 SDR 策略</div>}
         </CropStage>
         <div className="transport button-row"><button data-testid="play-video" data-playback-control title="空格：播放 / 暂停" disabled={blocked || !compatible || !previewAvailable || !frame} onClick={togglePlayback}>{playing ? '暂停' : '播放选段'}</button>
@@ -492,22 +523,44 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
           <button aria-pressed={!locked} disabled={blocked || copyMode} onClick={() => setLocked(false)}>自由框选</button><button disabled={blocked || copyMode} onClick={() => setCrop(fullCrop)}>重置画面</button>
           <span data-testid="crop-pixels">{pixels.width} × {pixels.height} · x {pixels.x} / y {pixels.y}</span></div>
       </div>
-      <aside className="editor-sidebar">
-        <section className="panel"><h3>封面</h3>
-          <div className="cover-preview" style={{ aspectRatio: `${pixels.width} / ${pixels.height}`, width: `min(100%, ${140 * pixels.width / pixels.height}px)` }}>
+      <aside className="editor-sidebar" aria-label="片段属性">
+        <div className="panel inspector-card" data-testid="clip-inspector">
+        <section className="inspector-cover"><div className="inspector-heading"><h3>封面</h3><span className="inspector-clip" data-testid="inspector-clip">片段 {String(activeClip.number).padStart(2, '0')}</span></div>
+          <div className="cover-preview" data-testid="inspector-cover-stage" style={{ aspectRatio: `${pixels.width} / ${pixels.height}`, width: `min(100%, ${200 * pixels.width / pixels.height}px)`, background: background }}>
             {cover ? <img data-testid="cover-preview" src={cover.url} alt={cover.name} style={cover.kind === 'custom' ? { width: '100%', height: '100%', objectFit: coverFit }
-              : { position: 'absolute', width: `${100 / visibleCrop.width}%`, height: `${100 / visibleCrop.height}%`, maxWidth: 'none', left: `${-visibleCrop.x / visibleCrop.width * 100}%`, top: `${-visibleCrop.y / visibleCrop.height * 100}%` }} /> : <span>自动使用本段实际首帧</span>}
+              : { position: 'absolute', width: `${100 / visibleCrop.width}%`, height: `${100 / visibleCrop.height}%`, maxWidth: 'none', left: `${-visibleCrop.x / visibleCrop.width * 100}%`, top: `${-visibleCrop.y / visibleCrop.height * 100}%` }} /> : <div className="cover-placeholder"><svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><rect x="5" y="4" width="22" height="24" rx="3"/><circle cx="20" cy="11" r="2"/><path d="m5 23 7-8 5 5 3-3 7 6"/></svg><strong>自动首帧</strong><span>使用选段起点的画面</span></div>}
           </div>
           <div className="button-row"><button data-testid="capture-cover" disabled={blocked || !compatible || !previewAvailable || !frame} onClick={() => void capture()}>使用当前帧</button><button data-testid="upload-cover" disabled={blocked} onClick={() => void upload()}>上传 JPG / PNG</button></div>
-          {cover && <button disabled={blocked} onClick={() => void automaticCover()}>恢复自动首帧封面</button>}
+          {cover && <button className="cover-reset" disabled={blocked} onClick={() => void automaticCover()}>恢复自动首帧封面</button>}
           {cover?.timeUs !== null && cover?.timeUs !== undefined && (cover.timeUs < clip.startUs || cover.timeUs >= clip.endUs) && <p className="hint">手选封面位于本段范围外，将作为独立封面保留。</p>}
-          {cover && <p className="hint" data-testid="cover-description">{cover.name}{cover.timeUs !== null ? ` · ${formatTime(cover.timeUs)}` : ' · 独立封面'}</p>}
-          {cover?.kind === 'custom' && <label className="field">封面适配<select aria-label="封面适配" disabled={blocked} value={coverFit} onChange={e => setCoverFit(e.target.value as 'cover' | 'contain')}><option value="cover">居中裁切，不拉伸</option><option value="contain">完整保留，黑色留边</option></select></label>}
-          {cover?.kind === 'custom' && <label className="field background-choice">透明区 / 留边背景<input aria-label="封面背景" type="color" value={background} disabled={blocked} onChange={e => setBackground(e.target.value)} /></label>}
+          {cover && <p className="hint cover-description" title={cover.name} data-testid="cover-description">{cover.name}{cover.timeUs !== null ? ` · ${formatTime(cover.timeUs)}` : ' · 独立封面'}</p>}
+          {cover?.kind === 'custom' && <div className="inspector-cover-options"><label className="field">封面适配<select aria-label="封面适配" disabled={blocked} value={coverFit} onChange={e => setCoverFit(e.target.value as 'cover' | 'contain')}><option value="cover">居中裁切，不拉伸</option><option value="contain">完整保留，留边</option></select></label>
+            <label className="field background-choice" title="透明区域与留边的背景颜色">背景<input aria-label="封面背景" type="color" value={background} disabled={blocked} onChange={e => setBackground(e.target.value)} /></label></div>}
         </section>
-        <section className="panel audio-panel"><h3>声音</h3>
-          {!outputOpen && audioControls}
+        <section className="inspector-selection" aria-label="当前选段信息">
+          <dl><div><dt>选段时长</dt><dd data-testid="inspector-duration">{((clip.endUs - clip.startUs) / 1e6).toFixed(2)}<small> 秒</small></dd></div><div><dt>画面尺寸</dt><dd data-testid="inspector-dimensions">{pixels.width} × {pixels.height}</dd></div></dl>
+          <div className="inspector-jump"><button data-testid="jump-clip-start" disabled={blocked || !compatible || !previewAvailable} onClick={() => exactSeek(clip.startUs)}><span aria-hidden="true">↤</span> 定位入点</button>
+            <button data-testid="jump-clip-end" disabled={blocked || !compatible || !previewAvailable} onClick={() => interact({ kind: 'end', phase: 'keyboard', timeUs: clip.endUs })}>定位出点 <span aria-hidden="true">↦</span></button></div>
+          <div className="inspector-trim"><button data-testid="set-clip-start" title="将播放头位置设为当前片段入点" disabled={blocked || !previewAvailable || !frame || position >= clip.endUs} onClick={() => trimAtPlayhead('start')}>设为入点</button>
+            <button data-testid="set-clip-end" title="将播放头位置设为当前片段出点（不含该时刻）" disabled={blocked || !previewAvailable || !frame || position <= clip.startUs} onClick={() => trimAtPlayhead('end')}>设为出点</button></div>
         </section>
+        <section className="inspector-aspect" aria-label="画面比例"><div className="inspector-heading"><h3>画面比例</h3><span>居中裁剪</span></div>
+          <div className="aspect-presets">{([{ label: '原比例', ratio: null }, { label: '1:1', ratio: 1 }, { label: '4:5', ratio: 4 / 5 }, { label: '9:16', ratio: 9 / 16 }, { label: '16:9', ratio: 16 / 9 }] as const).map(item => {
+            const preset = item.ratio === null ? fullCrop : centeredAspectCrop(asset.info.displayWidth, asset.info.displayHeight, item.ratio);
+            const selected = item.ratio === null ? (copyMode || locked && activeClip.crop.width === 1 && activeClip.crop.height === 1)
+              : !copyMode && !locked && (['x', 'y', 'width', 'height'] as const).every(key => Math.abs(activeClip.crop[key] - preset[key]) < 1e-8);
+            return <button key={item.label} aria-label={`裁剪比例 ${item.label}`} aria-pressed={selected} disabled={blocked || copyMode} onClick={() => applyAspect(item.ratio)}>{item.label}</button>;
+          })}</div>
+          {copyMode && <p className="hint">原画质模式使用完整画面</p>}
+        </section>
+        <details className="inspector-batch" data-testid="batch-clip-tools"><summary><span>批量操作 · {clips.length} 段</span><span data-testid="total-clip-duration" title="各选段时长之和；重叠部分按各段分别计入">合计 {clips.reduce((sum, item) => sum + (item.selection.endUs - item.selection.startUs) / 1e6, 0).toFixed(2)} 秒</span></summary>
+          <div className="batch-clip-actions">
+            <label className="field batch-duration-field">目标时长<div className="batch-duration-value"><input aria-label="统一片段时长（秒）" aria-describedby="batch-duration-help" aria-invalid={batchDurationUs === null} inputMode="decimal" maxLength={32} disabled={blocked} value={batchDuration} onChange={e => setBatchDuration(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); uniformDuration(); } }} /><span>秒</span></div></label>
+            <p className={`hint${batchDurationUs === null ? ' batch-duration-invalid' : ''}`} id="batch-duration-help">{batchDurationUs === null ? '请输入大于 0 的秒数，最多 3 位小数。' : '固定每段入点；片尾不足目标时长则保留剩余部分。'}</p>
+            <button data-testid="apply-all-clips-duration" disabled={blocked || batchDurationUs === null} onClick={uniformDuration}>应用到全部片段</button>
+            <button data-testid="sync-all-crops" disabled={blocked || copyMode || clips.length < 2} onClick={syncCurrentCrop}>同步当前裁剪到全部</button></div>
+        </details>
+        </div>
       </aside>
     </div>
     <section className="timeline-panel panel" aria-label="片段剪辑">
@@ -520,7 +573,7 @@ export function Editor({ ready, preparing, diagnosticsBusy, savingReady }: { rea
       <div className="clip-tabs" aria-label="切换片段（重叠选区可用编号选择）">{clips.map(item => <div key={item.id} className={`clip-tab ${item.id === activeClipId ? 'is-active' : ''}`}>
         <button aria-pressed={item.id === activeClipId} disabled={opening || Boolean(busy) || diagnosticsBusy}
           title={`${formatTime(item.selection.startUs)} — ${formatTime(item.selection.endUs)} · ${formatTime(item.selection.endUs - item.selection.startUs)}`}
-          onClick={() => activateClip(item.id)}>片段 {String(item.number).padStart(2, '0')}</button>
+          aria-label={`片段 ${String(item.number).padStart(2, '0')}`} onClick={() => activateClip(item.id)}>片段 {String(item.number).padStart(2, '0')}<span className="clip-length" aria-hidden="true">{((item.selection.endUs - item.selection.startUs) / 1e6).toFixed(2)}s</span></button>
         <button aria-label={`删除片段 ${item.number}`} disabled={clips.length === 1 || opening || Boolean(busy) || diagnosticsBusy} onClick={() => deleteClip(item.id)}>×</button>
       </div>)}</div>
       <Timeline key={asset.id} durationUs={duration} startUs={start} endUs={end} clips={clips} activeClipId={activeClipId} positionUs={position} thumbnails={thumbs}

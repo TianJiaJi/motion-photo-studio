@@ -32,6 +32,17 @@ test('space toggles playback without stealing forms; every export clip previews 
     const time=page.getByLabel('精确定位',{exact:true});await time.focus();await page.keyboard.press('Space');
     await expect(page.getByTestId('play-video')).toHaveText('播放选段');await time.fill('00:00:00.000');await time.press('Enter');
     await expect(canvas).toHaveAttribute('data-time-us','0');
+    const rangeValues=()=>page.locator('.trim-handle').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-valuenow')));
+    const originalRange=await rangeValues();
+    for(const id of ['trim-start','trim-end','timeline-playhead']) {
+      await page.getByTestId(id).focus();await expect(page.getByTestId(id)).toBeFocused();
+      await page.keyboard.press('Space');await expect(page.getByTestId('play-video')).toHaveText('暂停');
+      await page.keyboard.press('Space');await expect(page.getByTestId('play-video')).toHaveText('播放选段');
+      expect(await rangeValues()).toEqual(originalRange);
+    }
+    await page.getByTestId('timeline-playhead').focus();
+    expect(await page.getByTestId('timeline-playhead').evaluate(el=>getComputedStyle(el).outlineStyle)).toBe('none');
+    await time.fill('00:00:00.000');await time.press('Enter');await expect(canvas).toHaveAttribute('data-time-us','0');
     await page.getByRole('button',{name:'自由框选',exact:true}).click();
     const cropBox=(await page.getByTestId('crop-stage').boundingBox())!;
     await page.mouse.move(cropBox.x+cropBox.width*.4,cropBox.y+cropBox.height*.1);await page.mouse.down();
@@ -43,6 +54,13 @@ test('space toggles playback without stealing forms; every export clip previews 
       if(n>1)await page.getByTestId('add-clip').click();
       const end=page.getByLabel('截取结束',{exact:true});await end.fill(`00:00:0${n}.000`);await end.press('Enter');
     }
+    // Clicking empty track after a text field must move focus off the input.
+    await time.focus();const track=page.getByTestId('timeline'),trackBox=(await track.boundingBox())!;
+    await track.click({position:{x:trackBox.width*.9,y:trackBox.height/2}});await expect(track).toBeFocused();
+    await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(5000000);
+    await page.keyboard.press('Space');await expect(page.getByTestId('play-video')).toHaveText('暂停');
+    await page.keyboard.press('Space');await expect(page.getByTestId('play-video')).toHaveText('播放选段');
+    const restoreEnd=page.getByLabel('截取结束',{exact:true});await restoreEnd.fill('00:00:04.000');await restoreEnd.press('Enter');
     await expect(page.getByTestId('playhead')).toHaveText('00:00:04.000');
     await expect(canvas).toHaveAttribute('data-time-us','3966666');
     const editFrame = await canvas.getAttribute('data-time-us');
@@ -77,7 +95,7 @@ test('space toggles playback without stealing forms; every export clip previews 
     await page.getByTestId('export-play').click();await expect(page.getByTestId('export-play')).toHaveText('暂停');
     await dialog.getByRole('button',{name:'预览片段 2',exact:true}).click();await expect(canvas).toHaveAttribute('data-time-us','1000000');
     await expect(page.getByTestId('export-play')).toHaveText('播放');
-    const slider=page.getByLabel('片段预览进度',{exact:true});await slider.evaluate(node=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(node,'1999000');node.dispatchEvent(new Event('input',{bubbles:true}));node.dispatchEvent(new Event('change',{bubbles:true}));});
+    const slider=page.getByLabel('片段预览进度',{exact:true});await slider.focus();await page.keyboard.press('Space');await expect(page.getByTestId('export-play')).toHaveText('播放');await slider.evaluate(node=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(node,'1999000');node.dispatchEvent(new Event('input',{bubbles:true}));node.dispatchEvent(new Event('change',{bubbles:true}));});
     await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(1900000);
     expect(Number(await canvas.getAttribute('data-time-us'))).toBeLessThan(2000000);
     expect(await app.evaluate(()=>(globalThis as any).__livePreviewProcesses)).toEqual([]);

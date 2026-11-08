@@ -38,6 +38,14 @@ test('one timeline holds independent range selectors, including overlapping clip
         return nodes.every(node => { const rect = node.getBoundingClientRect(); return rect.y === track.y && rect.height === track.height; });
       })).toBe(true);
     };
+    // Keep physical desktop pointer activity from canceling CDP's captured drag.
+    const desktopLeft=await app.evaluate(({BrowserWindow,screen})=>{
+      const window=BrowserWindow.getAllWindows()[0]!,bounds=window.getBounds();
+      const left=Math.min(...screen.getAllDisplays().map(display=>display.bounds.x));
+      window.setPosition(left-bounds.width-256,bounds.y,false);return left;
+    });
+    // Windows applies the native move asynchronously; don't begin gestures until it lands.
+    await expect.poll(()=>app!.evaluate(({BrowserWindow},left)=>{const b=BrowserWindow.getAllWindows()[0]!.getBounds();return b.x+b.width<left;},desktopLeft)).toBe(true);
     await expectSingleTimeline(1);
     const originalHeight = (await page.getByTestId('timeline').boundingBox())!.height;
     await expect(page.getByRole('button', { name: '删除片段 1', exact: true })).toBeDisabled();
@@ -66,6 +74,15 @@ test('one timeline holds independent range selectors, including overlapping clip
     expect(Math.abs(Number(await secondStart.getAttribute('aria-valuenow')) - 2_400_000)).toBeLessThan(40000);
     await expect(firstStart).toHaveAttribute('aria-valuenow', '1000');
     await expect(page.getByRole('button', { name: '片段 02', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    // A real handle drag leaves focus on the slider: Space must transport, not disappear.
+    await expect(secondStart).toBeFocused();
+    const rangesBefore=await page.locator('.trim-handle').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-valuenow')));
+    const beforePlay=Number(await page.getByTestId('native-preview').getAttribute('data-time-us'));
+    await page.keyboard.down('Space');await expect(page.getByTestId('play-video')).toHaveText('暂停');
+    await expect.poll(async()=>Number(await page.getByTestId('native-preview').getAttribute('data-time-us'))).toBeGreaterThan(beforePlay+100000);
+    await page.keyboard.down('Space');await expect(page.getByTestId('play-video')).toHaveText('暂停');await page.keyboard.up('Space');
+    await page.keyboard.press('Space');await expect(page.getByTestId('play-video')).toHaveText('播放选段');
+    expect(await page.locator('.trim-handle').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('aria-valuenow')))).toEqual(rangesBefore);
     await page.getByTestId('export-motion').click();
     await page.getByLabel('输出帧率', { exact: true }).selectOption('24');
     await page.getByRole('button', { name: '关闭导出', exact: true }).click();

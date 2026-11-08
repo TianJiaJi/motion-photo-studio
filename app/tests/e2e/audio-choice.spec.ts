@@ -30,9 +30,10 @@ test('multi-audio UI requires a track choice or explicit omission and never sile
     await expect(page.getByTestId('play-video')).toBeDisabled();
     await expect(page.getByTestId('capture-cover')).toBeDisabled();
     await expect(page.getByTestId('native-preview')).not.toHaveAttribute('data-frame-id', /\d+/);
+    await expect(page.locator('.editor-sidebar').getByLabel('保留音轨', { exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: '前往导出设置选择音轨', exact: true }).click();
     const tracks = page.getByLabel('所保留的音轨', { exact: true }); await expect(tracks).toHaveValue('');
     await expect(page.getByLabel('保留音轨', { exact: true })).toBeChecked();
-    await page.getByTestId('export-motion').click();
     const preview = page.getByRole('dialog', { name: '导出实况照片', exact: true }); await expect(preview).toBeVisible();
     await expect(preview).toContainText('请选择音轨或关闭声音');
     await expect(page.getByTestId('confirm-export-all')).toBeDisabled(); await expect(page.getByTestId('export-play')).toBeDisabled();

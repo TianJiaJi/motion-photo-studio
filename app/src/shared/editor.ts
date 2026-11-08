@@ -27,6 +27,22 @@ export function clipSelectionAt(positionUs: number, durationUs: number): ClipSel
   return validateClip({ startUs, endUs }, durationUs);
 }
 
+/** Positive seconds with millisecond precision; reject rather than round invalid input. */
+export function parseClipDurationSeconds(value: string): number | null {
+  const text = value.trim();
+  if (text.length > 32 || !/^(?:\d+(?:\.\d{0,3})?|\.\d{1,3})$/.test(text)) return null;
+  const [whole, fraction = ''] = text.split('.');
+  const us = BigInt(whole || '0') * 1_000_000n + BigInt(fraction.padEnd(3, '0')) * 1_000n;
+  return us > 0n && us <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(us) : null;
+}
+
+/** Resize from the existing in-point; never shift it to compensate for EOF. */
+export function clipSelectionWithDuration(selection: ClipSelection, durationUs: number, lengthUs: number): ClipSelection {
+  validateClip(selection, durationUs);
+  if (!Number.isSafeInteger(lengthUs) || lengthUs <= 0) throw new Error('Invalid clip length');
+  return { startUs: selection.startUs, endUs: selection.startUs + Math.min(lengthUs, durationUs - selection.startUs) };
+}
+
 export function parseRational(value: string | undefined): Rational | null {
   const match = /^(\d+)\/(\d+)$/.exec(value ?? '');
   if (!match) return null;
@@ -92,6 +108,15 @@ export function cropToPixels(crop: CropRect, width: number, height: number): Pix
   const y = Math.min(even(crop.y * height), even(height - 2));
   return { x, y, width: Math.max(2, Math.min(even(width - x), even(crop.width * width))),
     height: Math.max(2, Math.min(even(height - y), even(crop.height * height))) };
+}
+
+/** Largest centered crop in display coordinates, preserving the requested aspect ratio. */
+export function centeredAspectCrop(width: number, height: number, aspect: number): CropRect {
+  if (![width, height].every(value => Number.isSafeInteger(value) && value >= 2)
+    || !Number.isFinite(aspect) || aspect <= 0) throw new Error('Invalid crop aspect or display dimensions');
+  const sourceAspect = width / height;
+  const w = Math.min(1, aspect / sourceAspect), h = Math.min(1, sourceAspect / aspect);
+  return { x: (1 - w) / 2, y: (1 - h) / 2, width: w, height: h };
 }
 
 export function validateExportSettings(value: ExportSettings): ExportSettings {

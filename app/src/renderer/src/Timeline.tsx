@@ -82,7 +82,7 @@ export function Timeline(props: Props) {
     } };
   return <div className={`trim-timeline ${props.disabled ? 'is-disabled' : ''}`} data-testid="trim-timeline">
     <div className="time-ticks" aria-hidden="true">{Array.from({ length: 5 }, (_, i) => <span key={i}>{formatTime(Math.round(props.startUs + span * i / 4))}</span>)}</div>
-    <div ref={track} className="timeline-track" data-testid="timeline" onPointerDown={e => begin(e, 'playhead')} {...interactions}>
+    <div ref={track} className="timeline-track" data-testid="timeline" tabIndex={props.disabled ? -1 : 0} role="group" aria-label="视频时间轴" onPointerDown={e => begin(e, 'playhead')} {...interactions}>
       <div className="thumbnails" aria-hidden="true">{props.thumbnails.map((thumb, i) => <img key={`${thumb.url}:${i}`} src={thumb.url} alt="" draggable={false} />)}</div>
       {props.loading && props.thumbnails.length === 0 && <div className="timeline-loading">正在读取画面…</div>}
       {props.clips.length === 1 && <><div className="trim-dim trim-dim-left" style={{ width: `${percent(activeClip.selection.startUs)}%` }} />
@@ -101,7 +101,7 @@ export function Timeline(props: Props) {
           {(['start', 'end'] as const).map(edge => {
             const value = edge === 'start' ? item.selection.startUs : item.selection.endUs;
             if (!visible(value)) return null;
-            return <button key={edge} type="button" role="slider" aria-label={`片段 ${item.number} ${edge === 'start' ? '入点' : '出点'}`}
+            return <button key={edge} type="button" role="slider" data-playback-shortcut aria-label={`片段 ${item.number} ${edge === 'start' ? '入点' : '出点'}`}
               aria-orientation="horizontal" aria-valuemin={edge === 'start' ? 0 : item.selection.startUs + Math.min(1000, props.durationUs)}
               aria-valuemax={edge === 'start' ? item.selection.endUs - Math.min(1000, props.durationUs) : props.durationUs}
               aria-valuenow={value} aria-valuetext={formatTime(value)} disabled={props.disabled}
@@ -112,7 +112,7 @@ export function Timeline(props: Props) {
           })}
         </div>;
       })}
-      {visible(props.positionUs) && <button type="button" role="slider" aria-label="播放位置" aria-orientation="horizontal"
+      {visible(props.positionUs) && <button type="button" role="slider" data-playback-shortcut aria-label="播放位置" aria-orientation="horizontal"
         aria-valuemin={props.startUs} aria-valuemax={props.endUs} aria-valuenow={props.positionUs} aria-valuetext={formatTime(props.positionUs)}
         disabled={props.disabled} className="timeline-playhead" data-testid="timeline-playhead" style={{ left: `${percent(props.positionUs)}%` }}
         onPointerDown={e => begin(e, 'playhead')} onKeyDown={e => keyboard(e, 'playhead')} {...interactions}><span aria-hidden="true" /></button>}

@@ -33,17 +33,23 @@ test('native desktop switches audio, replaces playing source, reports helper dea
     },[first,second,first]);
     await page.getByTestId('open-video').click();const canvas=page.getByTestId('native-preview'),play=page.getByTestId('play-video');
     await expect(play).toBeDisabled();
+    await page.getByRole('button',{name:'前往导出设置选择音轨',exact:true}).click();
     await expect(page.getByLabel('所保留的音轨',{exact:true})).toHaveValue('');
     await page.getByLabel('所保留的音轨',{exact:true}).selectOption('2');
+    await page.getByRole('button',{name:'关闭导出',exact:true}).click();
     await expect(canvas).toHaveAttribute('width','320',{timeout:60000});await expect(play).toBeEnabled();
     const initialHelpers=await app.evaluate(()=>(globalThis as any).__lifecycleSpawns.filter((row:any)=>row.executable.endsWith('motion-preview.exe')));
     expect(initialHelpers.filter((row:any)=>!row.closed)).toHaveLength(1);
     const beforeEditing=await app.evaluate(()=>(globalThis as any).__lifecycleSpawns.length);
     await play.click();await expect(play).toHaveText('暂停');
     await expect.poll(async()=>Number(await canvas.getAttribute('data-time-us'))).toBeGreaterThan(1000000);
-    await page.getByLabel('所保留的音轨',{exact:true}).selectOption('1');await expect(play).toHaveText('播放选段');
+    await page.getByTestId('export-motion').click();
+    await page.getByLabel('所保留的音轨',{exact:true}).selectOption('1');
+    await page.getByRole('button',{name:'关闭导出',exact:true}).click();await expect(play).toHaveText('播放选段');
     await play.click();await expect(play).toHaveText('暂停');
-    await page.getByLabel('保留音轨',{exact:true}).uncheck();await expect(play).toHaveText('播放选段');
+    await page.getByTestId('export-motion').click();
+    await page.getByLabel('保留音轨',{exact:true}).uncheck();
+    await page.getByRole('button',{name:'关闭导出',exact:true}).click();await expect(play).toHaveText('播放选段');
     await play.click();await expect(play).toHaveText('暂停');
     expect(await app.evaluate(()=>(globalThis as any).__lifecycleSpawns.length)).toBe(beforeEditing);
     // Import/replacement is an explicit preparation boundary; process starts here are expected.
@@ -67,7 +73,9 @@ test('native desktop switches audio, replaces playing source, reports helper dea
     expect(retried).toHaveLength(helpers.length+1);expect(retried.slice(0,-1).every((row:any)=>row.closed)).toBe(true);
     expect(retried.at(-1).closed).toBe(false);
     await page.getByTestId('open-video').click();await expect(page.getByTestId('asset-name')).toHaveText('audio-tracks.mp4');
-    await expect(play).toBeDisabled();await page.getByLabel('所保留的音轨',{exact:true}).selectOption('2');
+    await expect(play).toBeDisabled();await page.getByTestId('export-motion').click();
+    await page.getByLabel('所保留的音轨',{exact:true}).selectOption('2');
+    await page.getByRole('button',{name:'关闭导出',exact:true}).click();
     await expect(canvas).toHaveAttribute('width','320',{timeout:60000});await expect(play).toBeEnabled();
     await expect(page.getByRole('alert')).toHaveCount(0);
     await page.getByRole('button',{name:'关闭素材',exact:true}).click();await expect(page.getByTestId('editor')).toHaveCount(0);
