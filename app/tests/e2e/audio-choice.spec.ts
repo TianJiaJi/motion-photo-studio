@@ -1,4 +1,5 @@
 import { test, expect, _electron as electron } from '@playwright/test';
+import { playbackNeedsAudioEndpoint } from './audio-gate.ts';
 import { mkdtemp, mkdir, readFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -12,6 +13,7 @@ function environment(userData: string): Record<string, string> {
   env.PATH = `${env.SystemRoot ?? 'C:\\Windows'}\\System32`; env.MOTION_USER_DATA_DIR = userData; return env;
 }
 test('multi-audio UI requires a track choice or explicit omission and never silently defaults to first track', async () => {
+  await playbackNeedsAudioEndpoint();
   test.setTimeout(180000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-audio-choice-')); const userData = join(directory, 'user-data'); const input = join(directory, 'multi.mp4');
   let instance: Awaited<ReturnType<typeof electron.launch>> | undefined;

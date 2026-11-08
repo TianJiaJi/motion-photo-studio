@@ -5,7 +5,7 @@ import type { ProcessingEdits } from '../../shared/processing.ts';
 import type { AudioSelection } from '../../shared/export.ts';
 import { unlinkCreatedFile } from '../jobs/temp-files.ts';
 import type { EnginePaths } from './engine.ts';
-import { assertSource, openSource, type SourceFile } from './source.ts';
+import { assertSource, openSource, sameFileTarget, type SourceFile } from './source.ts';
 import { probeMedia } from './probe.ts';
 import { mediaInfo } from './info.ts';
 import { planEncodeRange, type EncodeRangePlan } from './encode-plan.ts';
@@ -28,7 +28,7 @@ export async function exportEncodedMedia(options: {
   onProgress?: (stage: 'audio' | 'video', timeUs: number) => void | Promise<void>;
 }): Promise<{ file: SourceFile; report: EncodeReport }> {
   const { source, engines, signal } = options; const output = resolve(options.output);
-  if ((process.platform === 'win32' ? output.toLowerCase() === source.path.toLowerCase() : output === source.path)) throw new Error('Cannot overwrite source');
+  if (sameFileTarget(output, source.path)) throw new Error('Cannot overwrite source');
   signal.throwIfAborted(); await assertSource(source);
   const probe = await probeMedia(source.path, { executable: engines.ffprobe, signal }); const info = mediaInfo(probe);
   if (probe.streams.filter(s => s.codec_type === 'video' && !s.disposition?.attached_pic).length !== 1) throw new Error('多个主视频轨尚需明确选择，不能静默丢弃。');

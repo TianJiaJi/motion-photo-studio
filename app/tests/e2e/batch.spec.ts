@@ -1,4 +1,5 @@
 import { test, expect, _electron as electron } from '@playwright/test';
+import { playbackNeedsAudioEndpoint } from './audio-gate.ts';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -6,6 +7,7 @@ import { runProcess } from '../../src/main/media/runner.ts';
 import { validateMotion } from '../../src/main/motion/validate.ts';
 
 test('one export dialog handles current/all clips, owns results, preserves outputs and gives the editor a large canvas', async () => {
+  await playbackNeedsAudioEndpoint();
   test.setTimeout(180000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-batch-ui-'));
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined;

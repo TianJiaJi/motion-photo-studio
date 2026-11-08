@@ -5,7 +5,7 @@ import { parseRational, ptsToUs, usToSeconds, type Rational } from '../../shared
 import { unlinkCreatedFile } from '../jobs/temp-files.ts';
 import { safeInteger } from '../motion/io.ts';
 import type { EnginePaths } from './engine.ts';
-import { assertSource, openSource, type SourceFile } from './source.ts';
+import { assertSource, openSource, sameFileTarget, type SourceFile } from './source.ts';
 import { assessCopySupport, probeCopySource, type CopyProbe, type CopySupport } from './copy-support.ts';
 import { packetPayloadKey, packetTimingKey, type CopyRangePlan } from './copy-plan.ts';
 import { scanPackets, type MediaPacket } from './packets.ts';
@@ -189,7 +189,7 @@ export async function exportCopyMedia(options: {
 }): Promise<{ file: SourceFile; report: CopyReport }> {
   const { source, plan, engines, signal } = options;
   const output = resolve(options.output); const input = resolve(source.path);
-  if ((process.platform === 'win32' ? output.toLowerCase() === input.toLowerCase() : output === input)) throw new Error('Cannot overwrite source');
+  if (sameFileTarget(output, input)) throw new Error('Cannot overwrite source');
   signal.throwIfAborted(); await assertSource(source);
   const sourceProbe = await probeCopySource(source, engines.ffprobe, signal);
   const assessed = assessCopySupport(sourceProbe, options.keepAudio);

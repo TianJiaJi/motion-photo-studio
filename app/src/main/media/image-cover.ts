@@ -3,7 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { unlinkCreatedFile } from '../jobs/temp-files.ts';
-import { assertSource, openSource, type SourceFile } from './source.ts';
+import { assertSource, openSource, sameFileTarget, type SourceFile } from './source.ts';
 import { parseJpegCoverRequest, type JpegCoverReport, type JpegCoverRequest } from './image-contract.ts';
 
 function workerPath(): string {
@@ -49,7 +49,7 @@ export async function createJpegCover(options: {
   const { source, signal } = options;
   const request = parseJpegCoverRequest({ input: source.path, output: resolve(options.output), width: options.width,
     height: options.height, fit: options.fit, background: options.background });
-  if (process.platform === 'win32' ? request.output.toLowerCase() === source.path.toLowerCase() : request.output === source.path) throw new Error('Cannot overwrite source');
+  if (sameFileTarget(request.output, source.path)) throw new Error('Cannot overwrite source');
   signal.throwIfAborted(); await assertSource(source);
   await writeFile(request.output, '', { flag: 'wx' }); let succeeded = false;
   try {

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { tempFiles } from '../helpers.ts';
+import { tempFiles, audioEndpointAvailable } from '../helpers.ts';
 import { recordMediaActivity, fullMediaScanMarkers, assertNoFullMediaScan } from '../media-activity.ts';
 import { runProcess } from '../../src/main/media/runner.ts';
 import { openSource } from '../../src/main/media/source.ts';
@@ -113,7 +113,8 @@ test('quick open performs no whole-file scans, prepares sound from bounded sampl
 
 // Ready means ready to hear: playback of the selected track starts the WASAPI clock without any
 // whole-file preparation, and stepping/covers resolve exact source identity on demand.
-test('quick playback runs the selected audio track and step/cover resolve exact identities without scans', { skip: !windows, timeout: 120000 }, async (t) => {
+test('quick playback runs the selected audio track on the audio clock without whole-file scans', { skip: !windows, timeout: 120000 }, async (t) => {
+  if (!(await audioEndpointAvailable(helper))) { t.skip('此主机没有音频输出端点，实际 WASAPI 播放须在有音频设备的主机验证'); return; }
   const temp = await tempFiles();
   let prepared: PreparedQuickMedia | undefined; let timeline: NativeTimeline | undefined;
   try {
@@ -133,8 +134,6 @@ test('quick playback runs the selected audio track and step/cover resolve exact 
       status(value) { states.push(value); },
     });
     const started = performance.now();
-    let stepped: Awaited<ReturnType<typeof timeline.media.frames.step>> | undefined;
-    let identity: { pts: string | null } | undefined;
     const { activity } = await recordMediaActivity(async () => {
       await timeline!.control({ assetId: 'asset', epoch: 1, action: 'play', startUs: 0, endUs: 1_500_000, audioTrack: info.audioTracks[0]!.index });
       const { value: before } = await prepared!.native.request<{ primary: { seeks: number } }>({ command: 'stats' });
@@ -144,10 +143,6 @@ test('quick playback runs the selected audio track and step/cover resolve exact 
       await timeline!.control({ assetId: 'asset', epoch: 2, action: 'pause' });
       const last = shown.at(-1)!;
       assert.equal(last.pts, null, 'playback frames carry no fabricated identity');
-      // Step resolves exact source identity on demand and moves exactly one presented frame.
-      stepped = await timeline!.media.frames.step(prepared!.native, { timeUs: last.timeUs, identity: null, nativeHns: last.nativeHns }, 1);
-      // Cover identity resolution pins the same displayed frame exactly.
-      identity = await timeline!.media.frames.resolveIdentity(prepared!.native, { timeUs: last.timeUs, identity: null, nativeHns: last.nativeHns });
     });
     t.diagnostic(`play ran ${Math.round(performance.now() - started)}ms`);
     assert.ok(shown.filter(frame => frame.epoch === 1).length >= 4, 'playing status alone is not evidence of moving pictures');
@@ -155,10 +150,50 @@ test('quick playback runs the selected audio track and step/cover resolve exact 
     assert.ok(states.some(state => state.state === 'playing'), `playback states: ${JSON.stringify(states.map(s => s.state))}`);
     assert.ok(activity.native.some(row => row.command === 'audioStart'), 'sound must start with playback');
     assert.ok(activity.native.some(row => row.command === 'audioStatus'), 'the video clock must read the audio clock');
+    assertNoFullMediaScan(activity, 'quick playback');
+  } finally { await timeline?.dispose(); await release(prepared); await temp.cleanup(); }
+});
+
+test('quick step/cover resolve exact identities without whole-file scans', { skip: !windows, timeout: 120000 }, async () => {
+  const temp = await tempFiles();
+  let prepared: PreparedQuickMedia | undefined; let timeline: NativeTimeline | undefined;
+  try {
+    const file = temp.file('step.mp4'); await generate(file);
+    const source = await openSource(file);
+    const probe = await probeMedia(file, { executable: ffprobe() });
+    const info = mediaInfo(probe);
+    const directory = temp.file('session'); await mkdir(directory);
+    prepared = await prepareQuickMedia({ source, info, probe, directory, helper, ffmpeg: ffmpeg(),
+      signal: new AbortController().signal, maximumEdge: 640 });
+    const shown: PreviewPixels[] = [];
+    timeline = new NativeTimeline('asset', source, prepared, {
+      frame(frame) {
+        shown.push(frame);
+        queueMicrotask(() => { timeline!.acknowledge({ assetId: 'asset', epoch: frame.epoch, frameId: frame.frameId, painted: true }); });
+      },
+      status() {},
+    });
+    let stepped: Awaited<ReturnType<typeof timeline.media.frames.step>> | undefined;
+    let identity: { pts: string | null } | undefined;
+    const { activity } = await recordMediaActivity(async () => {
+      // Silent-clock playback (no audio endpoint needed) yields the same identity-less
+      // display frames the audio path produces, preserving the original assertions.
+      await timeline!.control({ assetId: 'asset', epoch: 1, action: 'play', startUs: 0, endUs: 1_500_000, audioTrack: null });
+      const deadline = Date.now() + 5000;
+      while (!shown.some(frame => frame.epoch === 1) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+      await timeline!.control({ assetId: 'asset', epoch: 2, action: 'pause' });
+      const last = shown.at(-1)!;
+      assert.ok(last, 'silent playback must paint frames');
+      assert.equal(last.pts, null, 'playback frames carry no fabricated identity');
+      // Step resolves exact source identity on demand and moves exactly one presented frame.
+      stepped = await timeline!.media.frames.step(prepared!.native, { timeUs: last.timeUs, identity: null, nativeHns: last.nativeHns }, 1);
+      // Cover identity resolution pins the same displayed frame exactly.
+      identity = await timeline!.media.frames.resolveIdentity(prepared!.native, { timeUs: last.timeUs, identity: null, nativeHns: last.nativeHns });
+    });
     assert.ok(stepped?.identity, 'step must resolve exact identity');
     assert.ok(identity?.pts, 'cover resolution must return an exact source PTS');
     assert.notEqual(identity!.pts, stepped!.identity!.pts, 'the stepped frame is the successor of the resolved one');
-    assertNoFullMediaScan(activity, 'quick playback/step/cover');
+    assertNoFullMediaScan(activity, 'quick step/cover');
   } finally { await timeline?.dispose(); await release(prepared); await temp.cleanup(); }
 });
 

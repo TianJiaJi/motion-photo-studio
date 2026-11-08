@@ -1,4 +1,5 @@
 import {test,expect,_electron as electron} from '@playwright/test';
+import { playbackNeedsAudioEndpoint } from './audio-gate.ts';
 import {mkdir,readdir,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {runProcess} from '../../src/main/media/runner.ts';
@@ -9,6 +10,7 @@ function environment(userData:string){
   env.PATH=`${env.SystemRoot??'C:\\Windows'}\\System32`;env.MOTION_USER_DATA_DIR=userData;return env;
 }
 test('HEVC60 plays continuously through former segment boundaries on one Canvas and helper with no editing processes',async()=>{
+  await playbackNeedsAudioEndpoint();
   test.setTimeout(180000);
   const root=resolve(`../artifacts/native-preview/hevc-playback-${Date.now()}`);await mkdir(root,{recursive:true});
   const userData=join(root,'user-data'),input=join(root,'HEVC60.mp4');

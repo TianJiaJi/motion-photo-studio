@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { tempFiles } from '../helpers.ts';
+import { tempFiles, audioEndpointAvailable } from '../helpers.ts';
 import { nativeSessionHarness } from '../native-session-harness.ts';
 import { recordMediaActivity, assertNoFullMediaScan } from '../media-activity.ts';
 import { runProcess } from '../../src/main/media/runner.ts';
@@ -54,11 +54,20 @@ test('large audio-reader origin differences reject quick readiness, drain resour
     const path = h.temp.file('delayed.mp4'); await fixture(path, 0.4);
     const source = await openSource(path); const probe = await probeMedia(path, { executable: ffprobe }); const info = mediaInfo(probe);
     const directory = h.temp.file('rejected-quick'); await mkdir(directory);
-    await assert.rejects(prepareQuickMedia({ source, probe, info, directory, helper, ffmpeg, signal: new AbortController().signal }), (error: unknown) => {
-      const failure = error as { code?: string; message?: string };
-      assert.equal(failure.code, 'QUICK_UNSUPPORTED');
-      assert.match(failure.message ?? '', /原生时间原点/); t.diagnostic(failure.message!); return true;
-    });
+    // Capture an unexpected success so its helper is drained instead of leaking a child
+    // process that can hold the test file open after its assertions finish.
+    let unexpected: PreparedQuickMedia | undefined;
+    const pending = prepareQuickMedia({ source, probe, info, directory, helper, ffmpeg, signal: new AbortController().signal })
+      .then(value => { unexpected = value; return value; });
+    try {
+      await assert.rejects(pending, (error: unknown) => {
+        const failure = error as { code?: string; message?: string };
+        assert.equal(failure.code, 'QUICK_UNSUPPORTED');
+        assert.match(failure.message ?? '', /原生时间原点/); t.diagnostic(failure.message!); return true;
+      });
+    } finally {
+      if (unexpected) { await unexpected.native.shutdown(); await unexpected.frames.close(); }
+    }
     assert.deepEqual(await readdir(directory), [], 'failed quick preparation must drain its helper and leave no owned files');
     const asset = await h.manager.open(path);
     const ready = await h.manager.prepareNative(asset.id, false, asset.info.audioTracks[0]!.index);
@@ -67,17 +76,31 @@ test('large audio-reader origin differences reject quick readiness, drain resour
     const displayed = await h.seek(asset.id, 500_000); assert.ok(displayed.pts);
   } finally { await h.cleanup(); }
 });
-test('unsupported native PCM audio gives an audio-specific fallback and remains playable with the selected track', { skip, timeout: 120000 }, async () => {
+async function pcmFixture(h: Awaited<ReturnType<typeof nativeSessionHarness>>) {
+  const path = h.temp.file('pcm-in-mp4.mp4');
+  await runProcess(ffmpeg, ['-v', 'error', '-nostdin', '-n', '-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=30:duration=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=2', '-map', '0:v', '-map', '1:a',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'pcm_s16le', '-ac', '2', path]);
+  return path;
+}
+test('unsupported native PCM audio gives an audio-specific fallback', { skip, timeout: 120000 }, async () => {
   const h = await nativeSessionHarness();
   try {
-    const path = h.temp.file('pcm-in-mp4.mp4');
-    await runProcess(ffmpeg, ['-v', 'error', '-nostdin', '-n', '-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=30:duration=2',
-      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=2', '-map', '0:v', '-map', '1:a',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'pcm_s16le', '-ac', '2', path]);
+    const path = await pcmFixture(h);
     const asset = await h.manager.open(path), selected = asset.info.audioTracks[0]!.index;
     const ready = await h.manager.prepareNative(asset.id, false, selected);
     assert.equal(ready.mode, 'strict');
     assert.ok(ready.warnings.some(warning => warning.includes('所选音轨的原生解码或格式转换不可用')));
+  } finally { await h.cleanup(); }
+});
+test('PCM-selected audio remains playable through the actual WASAPI clock', { skip, timeout: 120000 }, async (t) => {
+  if (!(await audioEndpointAvailable(helper))) { t.skip('此主机没有音频输出端点，实际 WASAPI 播放须在有音频设备的主机验证'); return; }
+  const h = await nativeSessionHarness();
+  try {
+    const path = await pcmFixture(h);
+    const asset = await h.manager.open(path), selected = asset.info.audioTracks[0]!.index;
+    const ready = await h.manager.prepareNative(asset.id, false, selected);
+    assert.equal(ready.mode, 'strict');
     await h.manager.nativeControl({ assetId: asset.id, epoch: 100, action: 'play', startUs: 0, endUs: 500000, audioTrack: selected });
     await h.manager.nativeControl({ assetId: asset.id, epoch: 101, action: 'pause' });
   } finally { await h.cleanup(); }

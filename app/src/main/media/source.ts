@@ -1,6 +1,24 @@
 import { realpath, stat } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, resolve } from 'node:path';
 import { fromBigInt } from '../motion/io.ts';
 import { AppFailure } from '../errors.ts';
+
+// Source/output identity must survive 8.3 short names (e.g. RUNNER~1 temp directories),
+// drive-letter case and other harmless spelling differences. Compare resolved file targets.
+function canonicalTarget(path: string): string {
+  const absolute = resolve(path);
+  // Only the native realpath resolves 8.3 short names (RUNNER~1) and true case.
+  try { return realpathSync.native(absolute); }
+  catch {
+    try { return resolve(realpathSync.native(dirname(absolute)), basename(absolute)); }
+    catch { return absolute; }
+  }
+}
+export function sameFileTarget(a: string, b: string): boolean {
+  const left = canonicalTarget(a), right = canonicalTarget(b);
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
 
 export async function fileFingerprint(path: string): Promise<{ size: number; stamp: string }> {
   const info = await stat(path, { bigint: true });

@@ -1,10 +1,12 @@
 import { test, expect, _electron as electron } from '@playwright/test';
+import { playbackNeedsAudioEndpoint } from './audio-gate.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runProcess } from '../../src/main/media/runner.ts';
 
 test('one timeline holds independent range selectors, including overlapping clips, covers, crops and EOF additions', async () => {
+  await playbackNeedsAudioEndpoint();
   test.setTimeout(180000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-clips-ui-'));
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined;

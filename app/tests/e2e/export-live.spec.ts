@@ -1,4 +1,5 @@
 import { test, expect, _electron as electron } from '@playwright/test';
+import { playbackNeedsAudioEndpoint } from './audio-gate.ts';
 import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -6,6 +7,7 @@ import { runProcess } from '../../src/main/media/runner.ts';
 import { sha256 } from '../../src/main/motion/io.ts';
 
 test('space toggles playback without stealing forms; every export clip previews instantly on one native canvas', async () => {
+  await playbackNeedsAudioEndpoint();
   test.setTimeout(180000);
   const dir = await mkdtemp(join(tmpdir(), 'motion-live-export-')), source = join(dir, 'source.mp4'), blue = join(dir, 'blue.png');
   const userData = join(dir, 'profile'); let app: Awaited<ReturnType<typeof electron.launch>> | undefined;

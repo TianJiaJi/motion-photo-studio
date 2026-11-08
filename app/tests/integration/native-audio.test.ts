@@ -2,13 +2,14 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {setTimeout as delay} from 'node:timers/promises';
 import {resolve} from 'node:path';
-import {tempFiles} from '../helpers.ts';
+import {tempFiles,audioEndpointAvailable} from '../helpers.ts';
 import {runProcess} from '../../src/main/media/runner.ts';
 import {NativePreview} from '../../src/main/media/native-preview.ts';
 const skip=process.platform!=='win32',helper=resolve('resources/bin/motion-preview.exe');
 type Scan={frames:{timestampHns:string;samples:number}[];ended:boolean};
 type Status={running:boolean;timeHns:string;submittedFrames:number;underruns:number;error:string|null};
-test('MF selects actual audio tracks; delayed/short audio and tiny intervals have bounded source clocks', {skip,timeout:60000},async()=>{
+test('MF selects actual audio tracks; delayed/short audio and tiny intervals have bounded source clocks', {skip,timeout:60000},async(t)=>{
+  if(!await audioEndpointAvailable(helper)){t.skip('此主机没有音频输出端点，实际 WASAPI 音频时钟须在有音频设备的主机验证');return;}
   const temp=await tempFiles();const native=new NativePreview(helper);
   try {
     const path=temp.file('multitrack.mp4');

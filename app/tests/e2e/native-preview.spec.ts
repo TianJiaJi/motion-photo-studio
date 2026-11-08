@@ -1,4 +1,5 @@
 import {test,expect,_electron as electron} from '@playwright/test';
+import {playbackNeedsAudioEndpoint} from './audio-gate.ts';
 import {mkdir,readdir,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -10,6 +11,7 @@ function environment(userData:string):Record<string,string>{
   env.PATH=`${env.SystemRoot??'C:\\Windows'}\\System32`;env.MOTION_USER_DATA_DIR=userData;return env;
 }
 for(const compatibility of [false,true])test(`native Canvas updates while held: ${compatibility?'import compatibility':'direct H264'}`,async()=>{
+  await playbackNeedsAudioEndpoint();
   test.setTimeout(180000);
   const root=resolve(`../artifacts/native-preview/ui-${compatibility?'compat':'direct'}-${Date.now()}`);await mkdir(root,{recursive:true});
   const input=join(root,compatibility?'source.mkv':'source.mp4'),userData=join(root,'user-data');

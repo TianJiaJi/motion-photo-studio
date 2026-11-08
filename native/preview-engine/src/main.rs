@@ -316,6 +316,14 @@ fn run() -> AppResult<()> {
     transport.check_input()
 }
 fn main() {
+    // CI capability probe: report whether a default audio render endpoint exists.
+    if std::env::args().nth(1).as_deref() == Some("--probe-audio") {
+        match audio::probe_endpoint() {
+            Ok(()) => println!("{}", json!({"ok": true})),
+            Err(error) => println!("{}", json!({"ok": false, "error": error.to_string()})),
+        }
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("motion-preview: {error}");
         std::process::exit(1);

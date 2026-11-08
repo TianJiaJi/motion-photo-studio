@@ -1,4 +1,5 @@
 import { test, expect, _electron as electron } from '@playwright/test';
+import { playbackNeedsAudioEndpoint } from './audio-gate.ts';
 import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
@@ -13,6 +14,7 @@ function environment(userData: string): Record<string, string> {
 }
 
 test('offline editor imports through native dialog, paints Canvas, steps frames, crops, selects covers and cleans up', async () => {
+  await playbackNeedsAudioEndpoint();
   test.setTimeout(180000);
   const directory = await mkdtemp(join(tmpdir(), 'motion-editor-ui-'));
   const evidenceRoot = resolve(`../artifacts/native-preview/editor-${Date.now()}`); await mkdir(evidenceRoot, {recursive:true});

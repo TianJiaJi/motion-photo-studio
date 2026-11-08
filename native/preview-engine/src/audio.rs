@@ -46,6 +46,22 @@ fn clock_drained(padding: u32, submitted: u64, rate: u32, elapsed_hns: u128) -> 
     padding == 0 && elapsed_hns * u128::from(rate) >= u128::from(submitted) * 10_000_000
 }
 
+/// Capability probe mirroring playback's exact WASAPI opening calls, without decoding.
+/// Hosts without any audio render endpoint (CI runners) report failure honestly instead
+/// of pretending playback was validated there.
+pub fn probe_endpoint() -> AppResult<()> {
+    let _runtime = media::Runtime::new()?;
+    // SAFETY: COM is initialized by the runtime; the enumerator/device interfaces are
+    // owned locally and released at scope exit.
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+        let _client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,

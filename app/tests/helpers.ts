@@ -1,6 +1,21 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+// Real capability probe: the helper mirrors playback's WASAPI opening calls. A host with
+// no audio render endpoint cannot validate actual playback; such tests skip explicitly
+// there and must still fail for real audio errors wherever an endpoint exists.
+let audioEndpointProbe: Promise<boolean> | undefined;
+export function audioEndpointAvailable(helper: string): Promise<boolean> {
+  audioEndpointProbe ??= (async () => {
+    const output = execFileSync(helper, ['--probe-audio'], { encoding: 'utf8', timeout: 30_000, windowsHide: true }).trim();
+    const value = JSON.parse(output) as { ok?: unknown };
+    if (typeof value?.ok !== 'boolean') throw new Error(`Unexpected audio endpoint probe output: ${output.slice(0, 200)}`);
+    return value.ok;
+  })();
+  return audioEndpointProbe;
+}
 
 export async function tempFiles() {
   const directory = await mkdtemp(join(tmpdir(), 'motion-test-'));
