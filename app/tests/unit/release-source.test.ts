@@ -3,6 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 // @ts-expect-error Dependency-free pre-install release helper.
 import { sharpWindowsSource } from '../../scripts/release/package-source.mjs';
+// @ts-expect-error Dependency-free release diagnostics helper.
+import { safeConfigureDiagnostics } from '../../scripts/release/sanitize-config.mjs';
+test('configure diagnostics exclude the initial environment dump, retaining actual link errors',()=>{
+  const raw="# ./configure\nPRIVATE_KEY='secret\nmultiline'\nGITHUB_TOKEN='token'\ntest_cpp_condition windows.h _MSC_FULL_VER\ncheck_func_headers x265.h x265_api_get\nundefined reference to setupAssemblyPrimitives\n";
+  const safe=safeConfigureDiagnostics(raw);assert.doesNotMatch(safe,/PRIVATE_KEY|GITHUB_TOKEN|secret|multiline|token/);
+  assert.match(safe,/undefined reference to setupAssemblyPrimitives/);
+  assert.doesNotMatch(safeConfigureDiagnostics("SECRET='no compiler probes'"),/SECRET|no compiler probes'/);
+});
 test('locked mirror packages resolve to canonical upstream without changing integrity',()=>{
   const lock=JSON.parse(readFileSync('package-lock.json','utf8'));
   const pins=JSON.parse(readFileSync('release/sources.json','utf8'));

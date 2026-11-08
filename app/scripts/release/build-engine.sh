@@ -18,7 +18,7 @@ printf 'prefix=%s\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: zli
 (cd "$repos/zimg"; ./autogen.sh; ./configure --host="$cross" --prefix="$prefix" --enable-static --disable-shared; make -j"$jobs"; make install)
 
 # Both 8-bit and 10-bit HEVC are needed by the real media regression fixtures.
-cmake_args=(-G 'Unix Makefiles' -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER="$cross-gcc" -DCMAKE_CXX_COMPILER="$cross-g++" -DCMAKE_RC_COMPILER="$cross-windres" -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_BUILD_TYPE=Release -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5)
+cmake_args=(-G 'Unix Makefiles' -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DSTATIC_LINK_CRT=ON -DCMAKE_C_FLAGS=-static-libgcc "-DCMAKE_CXX_FLAGS=-static-libgcc -static-libstdc++" -DCMAKE_C_COMPILER="$cross-gcc" -DCMAKE_CXX_COMPILER="$cross-g++" -DCMAKE_RC_COMPILER="$cross-windres" -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_BUILD_TYPE=Release -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5)
 cmake -S "$repos/x265/source" -B "$root/x265-10" "${cmake_args[@]}" -DHIGH_BIT_DEPTH=ON -DEXPORT_C_API=OFF
 cmake --build "$root/x265-10" --parallel "$jobs"
 mkdir -p "$root/x265-8"
@@ -32,6 +32,9 @@ cmake --install "$root/x265-8"
   printf 'CREATE libx265.a\nADDLIB libx265_main.a\nADDLIB libx265_main10.a\nSAVE\nEND\n' | "$cross-ar" -M
   cp libx265.a "$prefix/lib/"
 )
+"$cross-nm" --defined-only -C "$prefix/lib/libx265.a" > "$root/x265-symbols.txt"
+grep -Fq 'x265::setupAssemblyPrimitives' "$root/x265-symbols.txt"
+grep -Fq 'x265_10bit::setupAssemblyPrimitives' "$root/x265-symbols.txt"
 
 (cd "$repos/ffmpeg"
   ./configure --prefix="$prefix" --target-os=mingw32 --arch=x86_64 --cross-prefix="$cross-" \
@@ -49,7 +52,9 @@ for exe in "$root/bundle/bin/"*.exe; do
     echo 'Unexpected non-system DLL dependency' >&2; exit 1
   fi
 done
-cp "$repos/ffmpeg/ffbuild/config.log" "$root/sources/ffmpeg-config.log"
+# config.log starts with an environment dump: never ship that as source material.
+cp "$repos/ffmpeg/ffbuild/config.mak" "$root/sources/ffmpeg-config.mak"
+cp "$repos/ffmpeg/config.h" "$root/sources/ffmpeg-config.h"
 printf '%s\n' "$("$cross-gcc" --version | head -1)" "$(cmake --version | head -1)" "$(nasm -v)" > "$root/sources/BUILD-TOOLS.txt"
 cp "$root/sources/SOURCE-PINS.json" "$root/bundle/licenses/ENGINE-SOURCE-PINS.json"
 mkdir -p "$root/bundle/licenses/toolchain"

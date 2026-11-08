@@ -72,13 +72,20 @@ jobs:
             artifacts/release-engine/BUILD-MANIFEST.json
             artifacts/release-engine/*-third-party-sources.tar.gz
           if-no-files-found: error
+      - name: Remove environment dump from configure diagnostics
+        if: failure()
+        working-directory: app
+        run: node scripts/release/sanitize-config.mjs
       - name: Retain source-build diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: engine-failure-${{ github.run_id }}-${{ github.sha }}
           path: |
-            artifacts/release-engine/repos/ffmpeg/ffbuild/config.log
+            artifacts/release-engine/repos/ffmpeg/ffbuild/config.safe.log
+            artifacts/release-engine/x265-symbols.txt
+            artifacts/release-engine/x265-*/CMakeCache.txt
+            artifacts/release-engine/prefix/lib/pkgconfig/*.pc
             artifacts/release-engine/source-metadata.mk
             artifacts/release-engine/repos/mxe/log/
             artifacts/release-engine/x265-*/CMakeFiles/CMake*.log
